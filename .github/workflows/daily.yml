@@ -50,4 +50,7 @@ jobs:
           TELEGRAM_BOT_TOKEN:  ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:    ${{ secrets.TELEGRAM_CHAT_ID }}
           SCHEDULER_ENABLED:   "false"   # el cron lo lleva GitHub, no APScheduler
+          # Resumen-señal de vida (S11). Default 'true' si el secret no existe (evita
+          # pasar cadena vacía, que rompería el parseo). Pon el secret a 'false' para apagarlo.
+          DIGEST_ENABLED:      ${{ secrets.DIGEST_ENABLED || 'true' }}
         run: python -m scripts.run_daily_cycle

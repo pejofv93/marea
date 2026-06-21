@@ -51,11 +51,27 @@ def build_steps(db=None):
     from app.ingest.intraday_runner import IntradayRunner
     from app.scoring.intraday_engine import IntradayScoreEngine
 
+    # Estado compartido entre pasos: el análisis intradía guarda aquí su
+    # resultado (movimientos en curso) para que el resumen final lo use sin
+    # recalcularlo.
+    shared: dict = {}
+
+    def _analisis():
+        res = IntradayAnalysisEngine(db=db).run_sync()
+        shared["intraday_analysis"] = res
+        return res
+
+    def _resumen():
+        # Paso final: resumen-señal de vida en Telegram (SIEMPRE, haya o no alertas).
+        from app.alerts.digest import send_intraday_digest
+        return send_intraday_digest(db=db, analysis=shared.get("intraday_analysis"))
+
     return [
         ("ingesta_intradia",  lambda: IntradayRunner(db=db).run_sync()),
         ("scores_intradia",   lambda: IntradayScoreEngine(db=db, min_obs=settings.score_min_obs).run_sync()),
-        ("analisis_intradia", lambda: IntradayAnalysisEngine(db=db).run_sync()),
+        ("analisis_intradia", _analisis),
         ("alertas",           lambda: AlertEngine(db=db).run_sync()),
+        ("resumen_telegram",  _resumen),
     ]
 
 

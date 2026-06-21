@@ -49,6 +49,12 @@ def build_steps(db=None):
     from app.scoring.engine import ScoreEngine
     from app.universe.dynamic import UniverseRecomputer
 
+    def _resumen():
+        # Paso final: resumen-señal de vida en Telegram (SIEMPRE, haya o no alertas).
+        # Lee el estado recién calculado (régimen, scores, rotaciones, narrativa) de la BD.
+        from app.alerts.digest import send_daily_digest
+        return send_daily_digest(db=db)
+
     return [
         ("ingesta_diaria",   lambda: IngestAll(db=db).run_sync()),
         ("recompute_universo", lambda: UniverseRecomputer(db=db).run_sync()),
@@ -56,6 +62,7 @@ def build_steps(db=None):
         ("analisis_diario",  lambda: AnalysisEngine(db=db).run_sync()),
         ("narrativa",        lambda: NarrativeEngine(db=db).run_sync()),
         ("alertas",          lambda: AlertEngine(db=db).run_sync()),
+        ("resumen_telegram", _resumen),
     ]
 
 

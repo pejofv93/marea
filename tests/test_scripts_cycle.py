@@ -134,6 +134,7 @@ def test_intraday_build_steps_orden_correcto():
         "scores_intradia",
         "analisis_intradia",
         "alertas",
+        "resumen_telegram",   # señal de vida, último paso
     ]
 
 
@@ -147,6 +148,7 @@ def test_daily_build_steps_orden_correcto():
         "analisis_diario",
         "narrativa",
         "alertas",
+        "resumen_telegram",   # señal de vida, último paso
     ]
 
 
@@ -156,7 +158,8 @@ def test_intraday_steps_invocan_los_engines_correctos():
     with patch("app.ingest.intraday_runner.IntradayRunner") as Runner, \
          patch("app.scoring.intraday_engine.IntradayScoreEngine") as Scorer, \
          patch("app.analysis.intraday.IntradayAnalysisEngine") as Analyzer, \
-         patch("app.alerts.engine.AlertEngine") as Alerter:
+         patch("app.alerts.engine.AlertEngine") as Alerter, \
+         patch("app.alerts.digest.send_intraday_digest", return_value={"ok": True}) as Digest:
         for cls in (Runner, Scorer, Analyzer, Alerter):
             cls.return_value.run_sync.return_value = {"ok": True}
 
@@ -168,6 +171,7 @@ def test_intraday_steps_invocan_los_engines_correctos():
         Scorer.return_value.run_sync.assert_called_once()
         Analyzer.return_value.run_sync.assert_called_once()
         Alerter.return_value.run_sync.assert_called_once()
+        Digest.assert_called_once()   # resumen enviado una vez por ciclo
 
 
 def test_daily_steps_invocan_los_engines_correctos():
@@ -177,7 +181,8 @@ def test_daily_steps_invocan_los_engines_correctos():
          patch("app.scoring.engine.ScoreEngine") as Scorer, \
          patch("app.analysis.engine.AnalysisEngine") as Analyzer, \
          patch("app.narrative.engine.NarrativeEngine") as Narrative, \
-         patch("app.alerts.engine.AlertEngine") as Alerter:
+         patch("app.alerts.engine.AlertEngine") as Alerter, \
+         patch("app.alerts.digest.send_daily_digest", return_value={"ok": True}) as Digest:
         for cls in (Ingest, Universe, Scorer, Analyzer, Narrative, Alerter):
             cls.return_value.run_sync.return_value = {"ok": True}
 
@@ -191,6 +196,7 @@ def test_daily_steps_invocan_los_engines_correctos():
         Analyzer.return_value.run_sync.assert_called_once()
         Narrative.return_value.run_sync.assert_called_once()
         Alerter.return_value.run_sync.assert_called_once()
+        Digest.assert_called_once()   # resumen enviado una vez por ciclo
 
 
 def test_main_intraday_devuelve_exit_code(monkeypatch):

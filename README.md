@@ -574,6 +574,64 @@ pytest tests/test_dashboard_data.py -v
 
 ---
 
+## Sesión 11 — Mensaje-resumen por ciclo en Telegram (señal de vida)
+
+Las alertas de la S8 solo llegan **por evento** (régimen, flujo extremo…) y con
+filtro de confianza. En cold start o mercado tranquilo, Telegram queda en
+silencio y no se distingue *"funciona y calla"* de *"está roto"*.
+
+La S11 añade un **mensaje-resumen que se envía SIEMPRE en cada ciclo** (intradía
+y diario), haya o no alertas. Cumple dos funciones:
+
+1. **Foto del mercado** en ese momento (apertura / media sesión / cierre).
+2. **Señal de vida**: si llega, MAREA corre; si un día no llega, algo falló.
+
+Es **adicional** a las alertas, **no** las sustituye: las alertas (confianza
+alta, anti-duplicado, histéresis) siguen igual, por encima del resumen. El
+resumen **no** usa anti-duplicado (es intencional que llegue en cada ciclo).
+
+### Qué contiene
+
+| Resumen DIARIO (22:30) | Resumen INTRADÍA (15:30 / 18:00 / 20:00) |
+|------------------------|------------------------------------------|
+| Régimen + confianza **real** + señales en lenguaje claro | Momento del día (apertura / media sesión / tarde) |
+| Top 3 entradas y top 3 salidas por activo (con valor) | Movimientos intradía fuertes (o "sin movimientos") |
+| Rotación sectorial destacada | Contexto DXY / VIX intradía |
+| Una línea de la narrativa más reciente | Sello "no es consejo de inversión" |
+| Sello "no es consejo de inversión" | |
+
+### Honestidad sobre la confianza
+
+Coherente con la narrativa y el dashboard: si los datos están en **cold start /
+baja confianza**, el resumen lo dice explícitamente con
+**⚠️ *Datos preliminares (histórico insuficiente, baja confianza)*** al
+principio. Cuando los datos maduran (confianza ok), esa coletilla **desaparece
+sola**. Nunca se presenta un dato preliminar como sólido.
+
+### Dónde vive
+
+- `app/alerts/digest.py` — composición pura (`build_daily_digest`,
+  `build_intraday_digest`) + envío (`send_daily_digest`, `send_intraday_digest`).
+  Reutiliza el cliente Telegram existente (`app/alerts/telegram.py`), no lo duplica.
+- Se engancha como **paso final** de cada ciclo en `scripts/run_*_cycle.py`,
+  después de ingesta → scores → análisis → [narrativa] → alertas.
+- Si el envío de Telegram falla: **log y se continúa** (no tumba el ciclo).
+
+### Desactivarlo (sin tocar código)
+
+Variable de entorno **`DIGEST_ENABLED`** (por defecto `true`). Para apagar el
+resumen, añádela como GitHub Secret (o en tu `.env` local) con valor `false`:
+
+```bash
+DIGEST_ENABLED=false
+```
+
+> En GitHub: **Settings → Secrets and variables → Actions → New repository
+> secret**, nombre `DIGEST_ENABLED`, valor `false`. Si no la defines, el
+> resumen se envía (comportamiento por defecto).
+
+---
+
 ## Sesión 10 — Despliegue y automatización (GitHub Actions, coste cero)
 
 A partir de aquí MAREA corre **sola**, sin arrancarla a mano y sin pagar nada.
@@ -720,6 +778,10 @@ repositorio:
 
 > Los workflows leen estos secrets y se los pasan a los scripts como variables
 > de entorno. Nunca aparecen en el código ni en los logs.
+
+> **Opcional — `DIGEST_ENABLED`:** no hace falta añadirlo. Solo si algún día
+> quieres **apagar el mensaje-resumen** (ver Sesión 11) crea un secret más
+> llamado `DIGEST_ENABLED` con valor `false`. Si no existe, el resumen se envía.
 
 ### Paso 5 — Verificar que los workflows aparecen
 

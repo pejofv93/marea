@@ -24,6 +24,8 @@ class Settings(BaseSettings):
     intraday_interval: str = "60m"        # '60m' | '15m'
     intraday_period: str = "5d"           # period de yfinance para barras intradía
     intraday_flow_threshold: float = 0.6  # |score intradía| que dispara alerta/análisis
+    # Resumen por ciclo en Telegram (Sesión 11) — señal de vida + foto del mercado
+    digest_enabled: bool = True           # envía el mensaje-resumen en cada ciclo
 
     model_config = SettingsConfigDict(
         env_file=".env",
