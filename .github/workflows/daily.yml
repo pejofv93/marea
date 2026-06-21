@@ -1,0 +1,53 @@
+name: MAREA — Ciclo diario
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Ejecuta la cadena diaria completa (ingesta → universo → scores → análisis →
+# narrativa → alertas) una vez al día, tras el cierre de EE. UU.
+#
+# Horario objetivo en hora ESPAÑOLA PENINSULAR; el cron va en UTC. Conversión
+# asumiendo horario de VERANO (CEST = UTC+2):
+#
+#   Hora España (verano, UTC+2)   →   UTC (cron)
+#   ───────────────────────────       ──────────
+#   22:30  tras cierre USA         →   20:30
+#   (el cierre de USA, 16:00 ET, son las 22:00 españolas en verano)
+#
+# ⚠️ HORARIO DE INVIERNO (CET = UTC+1): para mantener las 22:30 locales habría
+#    que usar "30 21 * * *" (21:30 UTC). El cron de abajo está fijado a verano.
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  schedule:
+    - cron: "30 20 * * *"   # 22:30 España (verano) — tras cierre USA
+  workflow_dispatch:          # permite lanzarlo a mano desde la pestaña «Actions»
+
+concurrency:
+  group: marea-daily
+  cancel-in-progress: false
+
+jobs:
+  daily-cycle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout del repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Ejecutar ciclo diario
+        env:
+          SUPABASE_URL:        ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY:        ${{ secrets.SUPABASE_KEY }}
+          GROQ_API_KEY:        ${{ secrets.GROQ_API_KEY }}
+          TELEGRAM_BOT_TOKEN:  ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:    ${{ secrets.TELEGRAM_CHAT_ID }}
+          SCHEDULER_ENABLED:   "false"   # el cron lo lleva GitHub, no APScheduler
+        run: python -m scripts.run_daily_cycle
