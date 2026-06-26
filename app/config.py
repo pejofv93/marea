@@ -26,6 +26,13 @@ class Settings(BaseSettings):
     intraday_flow_threshold: float = 0.6  # |score intradía| que dispara alerta/análisis
     # Resumen por ciclo en Telegram (Sesión 11) — señal de vida + foto del mercado
     digest_enabled: bool = True           # envía el mensaje-resumen en cada ciclo
+    # Indicadores de CONTEXTO de régimen (Bloque 1) — termómetros, no flujo.
+    # Auto-activación: un indicador no modula el régimen ni se presenta como señal
+    # sólida hasta acumular al menos context_min_obs observaciones propias.
+    context_min_obs: int = 5
+    # Ticker del 2Y para la curva 10Y-2Y (CBOE 2-Year yield future en yfinance).
+    # Configurable por si cambia: ^FVX (5Y) o ^IRX (3M) sirven como alternativa.
+    yield_curve_short_ticker: str = "2YY=F"
 
     model_config = SettingsConfigDict(
         env_file=".env",

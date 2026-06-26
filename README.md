@@ -947,6 +947,99 @@ haz `git add`, `git commit` y `git push`. GitHub recoge el cambio solo.
 
 ---
 
+## Bloque 1 — Indicadores de CONTEXTO de régimen (con auto-activación)
+
+Cuatro indicadores macro nuevos que **afinan** la lectura de régimen pero que
+**NO son flujos de liquidez**: son termómetros de estado, misma filosofía que
+`^VIX`/`CRYPTO_FNG`. Por eso **no entran en los rankings de entrada/salida ni
+disparan alertas de flujo** — viven en su propia tabla `context_indicators`, no
+en `flow_scores` (exclusión por construcción, no por lista que mantener).
+
+### Indicadores y fuentes (verificadas)
+
+| Indicador | Qué mide | Fuente (gratis) | Estado |
+|-----------|----------|-----------------|--------|
+| `btc_dominance` | % de market cap de BTC sobre el total crypto. Sube = rotación a BTC (miedo en alts); baja = apetito por riesgo | CoinGecko `/global` → `market_cap_percentage.btc` | ✅ activo |
+| `credit_spread` | Ratio **HYG/LQD** (high-yield vs investment-grade). Cae = el high-yield sufre más → spreads ensanchándose → risk-off | yfinance `HYG`, `LQD` | ✅ activo |
+| `yield_curve` | Spread **10Y-2Y** en puntos porcentuales (`^TNX` − `2YY=F`). < 0 = curva invertida → señal de recesión / risk-off | yfinance `^TNX` (10Y) y `2YY=F` (2Y, CBOE yield future) | ✅ activo |
+| `put/call ratio` | Sentimiento de opciones | — | ❌ **OMITIDO** |
+
+**Por qué se omite put/call:** tras verificar fuentes (jun-2026), CBOE gatea sus
+endpoints (`cdn.cboe.com/api/...` → 403; `market_statistics/daily` → redirección
+a página gateada): no hay API gratuita y estable de put/call total. Derivarlo de
+las cadenas de opciones de yfinance es frágil (solo da la foto actual, sin
+histórico, lo que rompe el modelo de auto-activación por `min_obs`, además de
+lento y propenso a rate-limit). **No se fuerza una fuente dudosa**; si en el
+futuro aparece una fiable, se añade como cuarto indicador sin tocar el resto.
+
+> **Sobre el 2Y:** yfinance no expone un índice 2Y «de caja», pero **sí** un
+> futuro de rendimiento del 2Y de CBOE (`2YY=F`), que da el spread 10Y-2Y
+> clásico (no un proxy 5Y). El ticker corto es configurable
+> (`YIELD_CURVE_SHORT_TICKER`, por defecto `2YY=F`; alternativas `^FVX` 5Y o
+> `^IRX` 3M).
+
+### Auto-activación (clave — patrón para bloques futuros)
+
+Cada indicador se **enciende solo** cuando acumula histórico suficiente y
+**degrada con elegancia** mientras no:
+
+- Umbral mínimo de observaciones por indicador: `CONTEXT_MIN_OBS` (def. **5**),
+  análogo al `score_min_obs` del scoring.
+- Por **debajo** del umbral: el indicador **no modula** el régimen y se muestra
+  marcado `(preliminar)` en el parte (o se omite si aún no tiene ni un dato).
+- Por **encima**: modula el régimen y se presenta como señal sólida.
+- Si falta el dato, **se omite limpiamente** (igual que la comparación temporal
+  del digest: «sin parte anterior»). El sistema nunca se rompe ni ensucia los
+  partes por un indicador que aún no está listo.
+- **Se puede mergear ya**: cada indicador se autoenciende al acumular datos, sin
+  intervención manual futura.
+
+### Cómo entran en el régimen
+
+Como **moduladores de confianza**, igual que DXY/VIX: refuerzan un régimen que
+**ya encajó por flujos** (añaden confianza y aparecen como señales), pero
+**NUNCA disparan un régimen por sí solos**. Si no hay candidatos de flujo, el
+contexto no hace nada. Señales que añaden:
+
+- `credit_spread_widening` / `yield_curve_inverted` / `yield_curve_flattening` /
+  `btc_dominance_rising` → refuerzan **risk_off** y **flight_to_safety**.
+- `credit_spread_tightening` / `yield_curve_steepening` /
+  `btc_dominance_falling` → refuerzan **risk_on**.
+
+Además enriquecen la **línea de contexto del parte** (bloque «🌡 Contexto
+macro»), junto al régimen y sus señales.
+
+### Robustez
+
+Cada fuente nueva va en su propio `try/except` dentro de `ContextIngestRunner`
+(una fuente más de `IngestAll`): si falla (API caída, ticker cambiado), se
+registra y el ciclo **continúa**. HYG/LQD/^TNX/2YY=F se piden en **un solo lote**
+de yfinance (anti rate-limit). Si el contexto entero no está disponible, MAREA
+sigue funcionando **exactamente igual** que antes.
+
+### Nueva migración
+
+```text
+migrations/012_context_indicators.sql   ← tabla context_indicators (NO toca anteriores)
+```
+
+### Variables de entorno (opcionales)
+
+| Variable | Default | Significado |
+|----------|---------|-------------|
+| `CONTEXT_MIN_OBS` | `5` | Observaciones mínimas para que un indicador se active |
+| `YIELD_CURVE_SHORT_TICKER` | `2YY=F` | Ticker del tramo corto de la curva (2Y) |
+
+### Tests
+
+`tests/test_context.py` (30 tests): cálculo de cada indicador, ingesta aislada
+(escribe solo en `context_indicators`), auto-activación (bajo/sobre `min_obs`),
+degradación elegante ante fallo de fuente o BD, el contexto modula pero **no
+crea** régimen, no contaminan los rankings de flujo, y put/call documentado como
+omitido.
+
+---
+
 ## Sesiones futuras
 
 - (todas las sesiones planificadas completadas)

@@ -428,7 +428,22 @@ _SIGNAL_ES = {
     "vix_calm":                 "volatilidad baja",
     "vix_fearful":              "volatilidad alta (miedo)",
     "sector_rotation_detected": "rotación sectorial",
+    # Contexto macro (Bloque 1): moduladores de régimen
+    "credit_spread_widening":   "spreads de crédito ensanchándose",
+    "credit_spread_tightening": "spreads de crédito estrechándose",
+    "yield_curve_inverted":     "curva de tipos invertida",
+    "yield_curve_flattening":   "curva de tipos aplanándose",
+    "yield_curve_steepening":   "curva de tipos empinándose",
+    "btc_dominance_rising":     "dominancia BTC subiendo",
+    "btc_dominance_falling":    "dominancia BTC bajando",
 }
+
+
+def _context_block(context_lines: list[str] | None) -> list[str] | None:
+    """Bloque 'Contexto macro' con los indicadores ya activos. None si no hay."""
+    if not context_lines:
+        return None
+    return ["🌡 <b>Contexto macro:</b>"] + list(context_lines)
 
 
 def _narrative_snippet(narrative: str | None) -> str | None:
@@ -451,10 +466,12 @@ def build_daily_digest(
     narrative: str | None = None,
     now_label: str = "Cierre de mercado",
     compare: dict | None = None,
+    context_lines: list[str] | None = None,
 ) -> str:
     """
     Parte DIARIO completo. ``state`` = {assets, regime, cold_start, rotations}.
     ``compare`` = {label, scores:{ticker:score}} del parte anterior (o None).
+    ``context_lines`` = líneas del bloque "Contexto macro" (Bloque 1), o None.
     """
     state = state or {}
     assets = state.get("assets") or []
@@ -506,6 +523,11 @@ def build_daily_digest(
     # 9. Fondo
     blocks.append([_fondo_line(regime, cold_start)])
 
+    # 9b. Contexto macro (Bloque 1) — solo indicadores ya activos / preliminares
+    ctx = _context_block(context_lines)
+    if ctx:
+        blocks.append(ctx)
+
     # (color) narrativa Groq, opcional
     snippet = _narrative_snippet(narrative)
     if snippet:
@@ -521,10 +543,12 @@ def build_intraday_digest(
     state: dict,
     moment: str = "Sesión USA",
     compare: dict | None = None,
+    context_lines: list[str] | None = None,
 ) -> str:
     """
     Parte INTRADÍA (versión corta). ``state`` = {assets, cold_start?}.
     Top 3 (no 5), sin bloque largo de fondo; misma exigencia en crypto/pólvora.
+    ``context_lines`` = líneas del bloque "Contexto macro" (Bloque 1), o None.
     """
     state = state or {}
     assets = state.get("assets") or []
@@ -557,6 +581,11 @@ def build_intraday_digest(
     blocks.append(_crypto_block(assets))
     blocks.append(_compare_block(assets, compare))
     blocks.append([_who_dominates(assets)])
+
+    ctx = _context_block(context_lines)
+    if ctx:
+        blocks.append(ctx)
+
     blocks.append([_DISCLAIMER])
 
     return "\n\n".join("\n".join(b) for b in blocks)
@@ -576,6 +605,16 @@ def _resolve_db(db):
         return db
     from app.db import get_db
     return get_db()
+
+
+def _load_context_lines(db) -> list[str]:
+    """Líneas del bloque de contexto macro (Bloque 1). Best-effort: [] si falla."""
+    try:
+        from app.analysis.context import evaluate_context
+        return evaluate_context(db).digest_lines
+    except Exception as e:  # noqa: BLE001 — el contexto nunca debe romper el parte
+        logger.warning("No se pudieron cargar líneas de contexto para el parte: %s", e)
+        return []
 
 
 def _send(text: str, send_fn=None) -> bool:
@@ -617,7 +656,11 @@ def send_daily_digest(db=None, now_label: str = "Cierre de mercado", send_fn=Non
         moment = "cierre"
         compare = _load_prev_cycle(rdb, "daily", moment)
         narrative = _latest_narrative(rdb)
-        text = build_daily_digest(state, narrative=narrative, now_label=now_label, compare=compare)
+        context_lines = _load_context_lines(rdb)
+        text = build_daily_digest(
+            state, narrative=narrative, now_label=now_label,
+            compare=compare, context_lines=context_lines,
+        )
         ok = _send(text, send_fn)
         result["sent"] = bool(ok)
         if not ok:
@@ -653,7 +696,11 @@ def send_intraday_digest(db=None, analysis: dict | None = None, hour_utc: int | 
         assets = _assets_from_movements(analysis)
         state = {"assets": assets}
         compare = _load_prev_cycle(rdb, "intraday", moment)
-        text = build_intraday_digest(state, moment=f"{moment_label} (intradía)", compare=compare)
+        context_lines = _load_context_lines(rdb)
+        text = build_intraday_digest(
+            state, moment=f"{moment_label} (intradía)",
+            compare=compare, context_lines=context_lines,
+        )
         ok = _send(text, send_fn)
         result["sent"] = bool(ok)
         if not ok:

@@ -11,6 +11,7 @@ from app.ingest.crypto_coingecko import IngestCoinGecko
 from app.ingest.crypto_defillama import IngestDefiLlama
 from app.ingest.crypto_binance import IngestBinance
 from app.ingest.crypto_fng import IngestFNG
+from app.ingest.context_runner import ContextIngestRunner
 
 logger = logging.getLogger("marea.ingest.run_all")
 
@@ -29,6 +30,10 @@ class IngestAll:
             ("defillama",      IngestDefiLlama(db=self._db)),
             ("binance",        IngestBinance(db=self._db)),
             ("fng",            IngestFNG(db=self._db)),
+            # Indicadores de contexto de régimen (Bloque 1): termómetros macro,
+            # NO flujo. Van a context_indicators, no a raw_snapshots. Como toda
+            # fuente, si falla se registra y el ciclo continúa.
+            ("context",        ContextIngestRunner(db=self._db)),
         ]
 
         by_source: dict[str, dict] = {}

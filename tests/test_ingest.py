@@ -434,34 +434,39 @@ def _empty_source_result(source: str) -> dict:
 
 class TestIngestAll:
     @patch("app.ingest.run_all.time.sleep")        # evita la pausa _HTTP_PAUSE_S en tests
+    @patch("app.ingest.run_all.ContextIngestRunner")
     @patch("app.ingest.run_all.IngestFNG")
     @patch("app.ingest.run_all.IngestBinance")
     @patch("app.ingest.run_all.IngestDefiLlama")
     @patch("app.ingest.run_all.IngestCoinGecko")
     @patch("app.ingest.run_all.IngestFixedUniverse")
-    def test_all_five_sources_run(self, mock_yf, mock_cg, mock_dl, mock_bn, mock_fng, mock_sleep):
-        """El orquestador ejecuta las 5 fuentes y devuelve by_source con todas."""
+    def test_all_sources_run(self, mock_yf, mock_cg, mock_dl, mock_bn, mock_fng, mock_ctx, mock_sleep):
+        """El orquestador ejecuta TODAS las fuentes (incl. contexto) y las lista."""
         from app.ingest.run_all import IngestAll
         _names = ["yfinance_fixed", "coingecko", "defillama", "binance", "fng"]
         for mock_cls, name in zip((mock_yf, mock_cg, mock_dl, mock_bn, mock_fng), _names):
             mock_cls.return_value.run_sync.return_value = _empty_source_result(name)
+        mock_ctx.return_value.run_sync.return_value = {
+            "source": "context", "indicators_written": 0, "errors": [], "ok": True,
+        }
 
         result = IngestAll().run_sync()
 
         assert set(result["by_source"].keys()) == {
-            "yfinance_fixed", "coingecko", "defillama", "binance", "fng"
+            "yfinance_fixed", "coingecko", "defillama", "binance", "fng", "context"
         }
         assert "total_snapshots" in result
         assert "ok" in result
 
     @patch("app.ingest.run_all.time.sleep")
+    @patch("app.ingest.run_all.ContextIngestRunner")
     @patch("app.ingest.run_all.IngestFNG")
     @patch("app.ingest.run_all.IngestBinance")
     @patch("app.ingest.run_all.IngestDefiLlama")
     @patch("app.ingest.run_all.IngestCoinGecko")
     @patch("app.ingest.run_all.IngestFixedUniverse")
     def test_single_source_crash_doesnt_abort_others(
-        self, mock_yf, mock_cg, mock_dl, mock_bn, mock_fng, mock_sleep
+        self, mock_yf, mock_cg, mock_dl, mock_bn, mock_fng, mock_ctx, mock_sleep
     ):
         """Si una fuente lanza excepción no capturada, el resto continúa ejecutándose."""
         from app.ingest.run_all import IngestAll
@@ -470,27 +475,32 @@ class TestIngestAll:
         _names = ["coingecko", "defillama", "binance", "fng"]
         for mock_cls, name in zip((mock_cg, mock_dl, mock_bn, mock_fng), _names):
             mock_cls.return_value.run_sync.return_value = _empty_source_result(name)
+        mock_ctx.return_value.run_sync.return_value = {
+            "source": "context", "indicators_written": 0, "errors": [], "ok": True,
+        }
 
         result = IngestAll().run_sync()
 
         # yfinance_fixed debe estar marcado como fallido
         assert result["by_source"]["yfinance_fixed"]["ok"] is False
-        # Las otras 4 fuentes deben estar en by_source
-        for source in ("coingecko", "defillama", "binance", "fng"):
+        # Las demás fuentes deben estar en by_source
+        for source in ("coingecko", "defillama", "binance", "fng", "context"):
             assert source in result["by_source"]
         # El error de yfinance debe aparecer en la lista global
         assert any("yfinance_fixed" in e for e in result["errors"])
 
     @patch("app.ingest.run_all.time.sleep")
+    @patch("app.ingest.run_all.ContextIngestRunner")
     @patch("app.ingest.run_all.IngestFNG")
     @patch("app.ingest.run_all.IngestBinance")
     @patch("app.ingest.run_all.IngestDefiLlama")
     @patch("app.ingest.run_all.IngestCoinGecko")
     @patch("app.ingest.run_all.IngestFixedUniverse")
     def test_total_snapshots_is_sum(
-        self, mock_yf, mock_cg, mock_dl, mock_bn, mock_fng, mock_sleep
+        self, mock_yf, mock_cg, mock_dl, mock_bn, mock_fng, mock_ctx, mock_sleep
     ):
-        """total_snapshots debe ser la suma de todos los by_source."""
+        """total_snapshots debe ser la suma de los snapshots (contexto NO suma:
+        escribe indicadores, no snapshots)."""
         from app.ingest.run_all import IngestAll
 
         counts = {"yfinance_fixed": 25, "coingecko": 2, "defillama": 2, "binance": 2, "fng": 1}
@@ -501,6 +511,10 @@ class TestIngestAll:
             r = _empty_source_result(name)
             r["snapshots_inserted"] = counts[name]
             mock_cls.return_value.run_sync.return_value = r
+        # El contexto no aporta a snapshots (no tiene 'snapshots_inserted').
+        mock_ctx.return_value.run_sync.return_value = {
+            "source": "context", "indicators_written": 3, "errors": [], "ok": True,
+        }
 
         result = IngestAll().run_sync()
         assert result["total_snapshots"] == sum(counts.values())

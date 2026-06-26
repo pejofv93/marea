@@ -73,6 +73,7 @@ def classify_regime(
     has_sector_rotation: bool = False,
     rotation_confidence: float = 0.0,
     data_confidence_factor: float = 1.0,
+    context_modulators: dict[str, list[str]] | None = None,
 ) -> RegimeResult:
     """
     Clasifica el régimen de mercado usando reglas deterministas.
@@ -83,6 +84,14 @@ def classify_regime(
     `data_confidence_factor` ∈ [DATA_CONFIDENCE_FLOOR, 1.0]: penaliza la
     confianza estructural cuando los flow scores subyacentes tienen pocos datos
     (cold start). Ver compute_data_confidence_factor().
+
+    `context_modulators` = {regime: [labels]} con los indicadores de CONTEXTO
+    (Bloque 1: credit spread, curva de tipos, dominancia BTC) que apuntan a cada
+    régimen. Igual que DXY/VIX, son MODULADORES: añaden MODULATOR_BONUS de
+    confianza y aparecen como señales SOLO en regímenes que YA encajaron por
+    flujos. NUNCA crean un régimen por sí solos (si no hay candidatos de flujo,
+    el contexto no hace nada). La capa de auto-activación (app/analysis/context.py)
+    ya filtró: aquí solo llegan indicadores con histórico suficiente.
 
     Fórmula final:
       confidence = structural_confidence × data_confidence_factor
@@ -157,6 +166,16 @@ def classify_regime(
             mod_checks=[(scores.dxy > T, "dxy_rising")],
             min_core=2,   # mínimo: 1 safe inflow + 1 risky outflow (ya garantizados)
         )
+
+    # ── Moduladores de CONTEXTO (Bloque 1): refuerzan candidatos ya disparados ─
+    # Se aplican SOLO a regímenes que ya encajaron por flujos. Si `candidates`
+    # está vacío, el contexto no añade nada (no puede crear un régimen).
+    if context_modulators:
+        for i, (regime, conf, signals) in enumerate(candidates):
+            extra = [s for s in context_modulators.get(regime, []) if s not in signals]
+            if extra:
+                conf = min(1.0, conf + len(extra) * MODULATOR_BONUS)
+                candidates[i] = (regime, round(conf, 4), signals + extra)
 
     if not candidates:
         # Sin señales de flujo suficientes → neutral, salvo si hay rotación sectorial

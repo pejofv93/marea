@@ -99,7 +99,12 @@ class AnalysisEngine:
             # ── Paso 3: Régimen de mercado ────────────────────────────────────
             # Computar para ambas ventanas (7d scores ya cargados; 30d: carga separada)
             data_factor = compute_data_confidence_factor(records)
-            regime_rows = self._compute_regimes(class_df, sector_df, ts, result, data_factor)
+            # Moduladores de contexto (Bloque 1). Best-effort: si falla la lectura,
+            # devuelve {} y el régimen se calcula igual que antes (degradación elegante).
+            context_mods = self._load_context_modulators()
+            regime_rows = self._compute_regimes(
+                class_df, sector_df, ts, result, data_factor, context_mods
+            )
             self._upsert_regimes(regime_rows, result)
 
             # Tomar régimen 7d como resultado principal
@@ -136,6 +141,15 @@ class AnalysisEngine:
 
     # ── Cálculo de regímenes ──────────────────────────────────────────────────
 
+    def _load_context_modulators(self) -> dict[str, list[str]]:
+        """Lee y evalúa los indicadores de contexto. Nunca lanza → {} si falla."""
+        try:
+            from app.analysis.context import evaluate_context
+            return evaluate_context(self.db).regime_modulators
+        except Exception as e:  # noqa: BLE001
+            logger.warning("No se pudieron cargar moduladores de contexto: %s", e)
+            return {}
+
     def _compute_regimes(
         self,
         class_df,
@@ -143,6 +157,7 @@ class AnalysisEngine:
         ts: str,
         result: AnalysisResult,
         data_factor: float = 1.0,
+        context_mods: dict[str, list[str]] | None = None,
     ) -> list[dict]:
         """Clasifica el régimen con scores de window='7d' y window='30d'."""
         regime_rows: list[dict] = []
@@ -161,6 +176,7 @@ class AnalysisEngine:
                 has_sector_rotation=has_rot,
                 rotation_confidence=rot_conf,
                 data_confidence_factor=data_factor,
+                context_modulators=context_mods,
             )
             regime_rows.append(_regime_to_row(r7, ts, "7d"))
 
