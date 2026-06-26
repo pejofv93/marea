@@ -1,6 +1,6 @@
 # MAREA — Monitor de flujos de liquidez intermercado
 
-Sesiones completadas: **1** (scaffold + yfinance) · **2** (crypto + on-chain) · **3** (universo dinámico) · **4** (motor flow scores) · **5** (análisis intermercado) · **6** (mapa de exposición indirecta) · **7** (capa narrativa LLM) · **8** (motor de alertas + bot Telegram) · **9** (dashboard Streamlit) · **9b** (carril intradía)
+Sesiones completadas: **1** (scaffold + yfinance) · **2** (crypto + on-chain) · **3** (universo dinámico) · **4** (motor flow scores) · **5** (análisis intermercado) · **6** (mapa de exposición indirecta) · **7** (capa narrativa LLM) · **8** (motor de alertas + bot Telegram) · **9** (dashboard Streamlit) · **9b** (carril intradía) · **10** (despliegue GitHub Actions) · **11** (parte por ciclo en Telegram) · **12** (rediseño de los partes: "sigue la liquidez")
 
 ---
 
@@ -592,6 +592,12 @@ resumen **no** usa anti-duplicado (es intencional que llegue en cada ciclo).
 
 ### Qué contiene
 
+> **Nota:** el **formato** descrito en esta tabla fue **rediseñado en la
+> Sesión 12** ("sigue la liquidez"). Lo de aquí es el contenido original de la
+> S11; el formato vigente (semáforo, top 5, cierre de pólvora, comparación
+> temporal, "quién manda") está documentado en la **Sesión 12**. La S11 sigue
+> siendo la responsable de que el parte **se envíe siempre** (señal de vida).
+
 | Resumen DIARIO (22:30) | Resumen INTRADÍA (15:30 / 18:00 / 20:00) |
 |------------------------|------------------------------------------|
 | Régimen + confianza **real** + señales en lenguaje claro | Momento del día (apertura / media sesión / tarde) |
@@ -629,6 +635,129 @@ DIGEST_ENABLED=false
 > En GitHub: **Settings → Secrets and variables → Actions → New repository
 > secret**, nombre `DIGEST_ENABLED`, valor `false`. Si no la defines, el
 > resumen se envía (comportamiento por defecto).
+
+---
+
+## Sesión 12 — Rediseño de los partes: "sigue la liquidez"
+
+Los partes de la S11 eran demasiado *carcasa*: listaban números (`^GSPC +1.00`)
+sin explicar qué significan ni hacia dónde va el dinero. La S12 los reescribe
+para que **sigan la liquidez y la expliquen**, bajo una regla madre.
+
+### Principio rector — no dejar nada a medias
+
+> Todo flujo que sale va a algún sitio, **o se declara en espera**. Toda pólvora
+> de stablecoins liberada dispara hacia un destino **o se declara sin destino**.
+> Toda tensión entre fuerzas se resuelve diciendo **cuál manda** (o se declara
+> empate). Nunca se suelta una frase insinuante sin cerrarla.
+
+Cerrar el círculo es a veces *"esto fue a X"* (cuando los datos lo respaldan) y a
+veces *"esto está en espera, sin destino visible"* (cuando no). **Las dos
+cierran.** Lo prohibido es inventar un destino que los datos no respaldan, o
+dejar la frase colgando.
+
+### Afirmativo (flujo) vs condicional (destino / precio)
+
+| Nivel | Lenguaje | Ejemplo |
+|-------|----------|---------|
+| Lo que la liquidez **hizo** | **afirmativo** (hecho observado) | "Sale capital de bancos; entra en bolsa USA." |
+| El **destino inferido** por simultaneidad | **condicional** ("parece dirigirse a / apunta a") | "…parece dirigirse a S&P 500 y Dólar." |
+| El salto al **precio futuro** | **no se hace** | MAREA describe flujo, no predice precio. |
+
+> **Inferencia por simultaneidad, no rastreo.** Para decir "el dinero que sale de
+> X parece ir a Y", MAREA mira qué activos **reciben inflow ≥ moderado en el
+> mismo momento** en que X tiene salida. Si hay receptores claros, los nombra
+> como destino probable; si no, declara "sin destino visible — capital en
+> espera". MAREA **no puede rastrear** el dinero; el lenguaje condicional lo deja
+> claro siempre.
+
+### De números a significado
+
+- **Nombres reales, no tickers:** `^GSPC → S&P 500`, `DX-Y.NYB → Dólar (DXY)`,
+  `XLF → Financieras (bancos)`, `GC=F → Oro`, `BTC → Bitcoin`… (diccionario
+  `_READABLE` en `digest.py`, con respaldo a `assets.name` y al ticker).
+- **Intensidad graduada por el score:** `|score| ≥ 0.85 → fuerte` ·
+  `0.5–0.85 → moderada` · `< 0.5 → leve`. El lenguaje refleja la magnitud real.
+- **Termómetros excluidos de los flujos:** el VIX y el Fear&Greed son
+  sentimiento, no vasijas de liquidez → se excluyen de rankings/destino para no
+  escribir "el capital se fue al VIX".
+
+### Semáforo (umbrales documentados)
+
+Cada parte empieza con un titular tipo cabecera de periódico, precedido de un
+semáforo según `max|score|` de los flujos:
+
+| Color | Condición |
+|-------|-----------|
+| 🟢 tranquilo | `max|score| < 0.5` (ninguna fuerza supera lo moderado) |
+| 🟡 normal | `0.5 ≤ max|score| < 0.85` |
+| 🔴 fuerte | `max|score| ≥ 0.85`, **o** rotación sectorial fuerte, **o** régimen risk-off/refugio con confianza ≥ 0.6 |
+
+> En **cold start** nunca se pinta 🔴 (los datos no son fiables): por defecto 🟡,
+> y 🟢 solo si de verdad todo está plano.
+
+### Estructura del parte DIARIO
+
+1. **Semáforo + titular** (cabecera de periódico).
+2. Cabecera `📊 MAREA — Cierre de mercado` + coletilla *datos preliminares* si
+   cold start, + subtítulo `🔄 vs. [parte de comparación]`.
+3. `🔥 Lo más fuerte` — los 1-2 movimientos de mayor intensidad.
+4. `🟢 Más entrada de liquidez` — **TOP 5** con nombre + intensidad + score.
+5. `🔴 Más salida de liquidez` — **TOP 5**; **cada salida ≥ moderada se cierra
+   con su destino inferido o un "en espera"** (no dejar a medias).
+6. `💰 En crypto` — **siempre** nombres y dirección concretos + **cierre de la
+   pólvora** de stablecoins (uno de: a crypto / a otro lado / en espera / acumulándose).
+7. `🔄 Cambio desde [parte anterior]` — la "película": delta por activo,
+   giros de signo, intensificaciones, con **origen→destino**.
+8. `⚡ Quién manda` — **dictamina** la fuerza de mayor `|score|` y deriva la
+   presión, o declara **"señales cruzadas"** si están parejas (`Δ < 0.12`).
+9. `📈 Fondo` — régimen + confianza **real** (penalizada por cold start).
+10. Sello `⚠️ Interpretación automática · no es consejo de inversión.`
+
+El parte **INTRADÍA** es la versión corta: semáforo + titular, **Top 3** in/out,
+crypto + pólvora (igual de estricto), cambio temporal, quién manda, sello.
+Omite el bloque largo de fondo (el régimen es del diario).
+
+### Capa de comparación temporal (la "película" en vez de "foto")
+
+Cada parte se compara con el **anterior relevante** y compone el bloque `🔄`:
+
+| Parte | Se compara con |
+|-------|----------------|
+| Apertura | cierre anterior |
+| Media sesión | apertura de hoy |
+| Cierre | media sesión de hoy |
+
+El mapeo vive en `_COMPARE_MAP` (configurable). Cada ciclo **persiste sus flow
+scores** en la tabla `digest_cycles` (migración **011**), etiquetados con su
+**momento** (apertura / media / cierre) y carril (daily / intraday); el siguiente
+parte lee la fila previa por orden de emisión real (`created_at`) y calcula los
+deltas. Guardar los scores como JSONB mantiene la comparación uniforme entre el
+carril diario (ventana 7d) y el intradía (4h) — se comparan contra lo que cada
+parte realmente reportó, no mezclando ventanas.
+
+> **Degradación elegante (cold start).** Mientras no haya parte anterior, el
+> bloque dice explícitamente *"sin parte anterior suficiente para comparar
+> todavía"* — **no se inventa** una comparación. La capa cobra valor sola a
+> medida que MAREA acumula histórico; `digest_cycles` se llena sin backfill.
+
+### Groq redacta, los datos mandan
+
+Se reutiliza la narrativa de Groq existente solo como **frase de color** en
+cursiva. **Las cifras, rankings, destino inferido, cierre de pólvora y
+"quién manda" salen de REGLAS sobre los flow scores reales**, nunca de que Groq
+se los invente.
+
+### Dónde vive
+
+- `app/alerts/digest.py` — helpers puros (`_name`, `_intensity`, `_semaphore`,
+  `_infer_destination`, `_powder_line`, `_who_dominates`, `_compare_block`…),
+  los dos builders y los senders (cargan estado real, leen el ciclo anterior,
+  componen, envían y persisten).
+- `migrations/011_digest_cycles.sql` — tabla de comparación temporal.
+- `tests/test_digest.py` — cubre los siete entregables (no dejar a medias,
+  pólvora ×3, quién manda, comparación, nombres, intensidad, semáforo) sin tocar
+  Telegram ni la BD reales.
 
 ---
 
