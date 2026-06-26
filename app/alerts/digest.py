@@ -599,6 +599,25 @@ def _context_block(context_lines: list[str] | None) -> list[str] | None:
     return ["🌡 <b>Contexto macro:</b>"] + list(context_lines)
 
 
+# ── Agenda macro del día (Bloque 5): el "por qué" del movimiento ──────────────
+# La lógica vive en app/analysis/macro_calendar.py (tabla curada → eventos de hoy
+# en hora de Madrid). Aquí solo se renderiza. CONTEXTO, no predicción: dice qué
+# evento hay y cuándo, y que "suele traer volatilidad" (condicional, genérico);
+# nunca afirma dirección de precio.
+_MACRO_FLAG = {"US": "🇺🇸", "EZ": "🇪🇺"}
+
+
+def render_macro_block(events) -> list[str]:
+    """Bloque "📅 Agenda macro de hoy" (Bloque 5). Sin eventos → no se muestra."""
+    if not events:
+        return []
+    lines = ["📅 <b>Agenda macro de hoy:</b>"]
+    for e in events:
+        flag = _MACRO_FLAG.get(e.region, "")
+        lines.append(f"  • {e.time_madrid} {flag} {e.label} — suele traer volatilidad.")
+    return lines
+
+
 def _narrative_snippet(narrative: str | None) -> str | None:
     if not narrative or not narrative.strip():
         return None
@@ -622,6 +641,7 @@ def build_daily_digest(
     context_lines: list[str] | None = None,
     decouple_lines: list[str] | None = None,
     volume_lines: list[str] | None = None,
+    macro_lines: list[str] | None = None,
 ) -> str:
     """
     Parte DIARIO completo. ``state`` = {assets, regime, cold_start, rotations}.
@@ -629,6 +649,8 @@ def build_daily_digest(
     ``context_lines`` = líneas del bloque "Contexto macro" (Bloque 1), o None.
     ``decouple_lines``/``volume_lines`` = bloques de detección temprana (Bloque 4),
     ya renderizados; None/[] → no se muestran (no se satura el parte).
+    ``macro_lines`` = bloque "Agenda macro de hoy" (Bloque 5), ya renderizado;
+    None/[] → no se muestra.
     """
     state = state or {}
     assets = state.get("assets") or []
@@ -650,6 +672,11 @@ def build_daily_digest(
     if compare and compare.get("label"):
         head.append(f"🔄 vs. {compare['label']}")
     blocks.append(head)
+
+    # 2b. Agenda macro de hoy (Bloque 5) — el "por qué": enmarca el parte con los
+    #     eventos de alto impacto del día. Solo aparece si hay eventos hoy.
+    if macro_lines:
+        blocks.append(macro_lines)
 
     # 3. Lo más fuerte
     strong = _strongest_line(assets)
@@ -710,6 +737,7 @@ def build_intraday_digest(
     giros_lines: list[str] | None = None,
     ritmo_lines: list[str] | None = None,
     verdict_lines: list[str] | None = None,
+    macro_lines: list[str] | None = None,
 ) -> str:
     """
     Parte INTRADÍA (versión corta). ``state`` = {assets, cold_start?}.
@@ -717,6 +745,8 @@ def build_intraday_digest(
     ``context_lines`` = líneas del bloque "Contexto macro" (Bloque 1), o None.
     ``giros_lines``/``ritmo_lines``/``verdict_lines`` = bloques de la inteligencia
     intradía de sesión (Bloque 3), ya renderizados; None/[] → no se muestran.
+    ``macro_lines`` = bloque "Agenda macro de hoy" (Bloque 5; solo en apertura,
+    "lo que viene hoy"), ya renderizado; None/[] → no se muestra.
     """
     state = state or {}
     assets = state.get("assets") or []
@@ -736,6 +766,10 @@ def build_intraday_digest(
     if compare and compare.get("label"):
         head.append(f"🔄 vs. {compare['label']}")
     blocks.append(head)
+
+    # Agenda macro de hoy (Bloque 5) — "lo que viene hoy", útil en apertura.
+    if macro_lines:
+        blocks.append(macro_lines)
 
     inflow = _top_inflow(assets, 3)
     if inflow:
@@ -811,6 +845,19 @@ def _early_blocks(db) -> tuple[list[str], list[str]]:
         return [], []
 
 
+def _macro_lines() -> list[str]:
+    """
+    Bloque "Agenda macro de hoy" (Bloque 5). Best-effort: ante cualquier fallo o
+    día sin eventos devuelve [] (no se muestra). No necesita BD (tabla curada).
+    """
+    try:
+        from app.analysis.macro_calendar import todays_macro_events
+        return render_macro_block(todays_macro_events())
+    except Exception as e:  # noqa: BLE001 — la agenda macro nunca rompe el parte
+        logger.warning("Agenda macro no disponible para el parte: %s", e)
+        return []
+
+
 def _send(text: str, send_fn=None) -> bool:
     """Envía vía Telegram reutilizando el cliente existente. send_fn inyectable en tests."""
     if send_fn is not None:
@@ -852,10 +899,12 @@ def send_daily_digest(db=None, now_label: str = "Cierre de mercado", send_fn=Non
         narrative = _latest_narrative(rdb)
         context_lines = _load_context_lines(rdb)
         decouple_lines, volume_lines = _early_blocks(rdb)
+        macro_lines = _macro_lines()
         text = build_daily_digest(
             state, narrative=narrative, now_label=now_label,
             compare=compare, context_lines=context_lines,
             decouple_lines=decouple_lines, volume_lines=volume_lines,
+            macro_lines=macro_lines,
         )
         ok = _send(text, send_fn)
         result["sent"] = bool(ok)
@@ -895,10 +944,14 @@ def send_intraday_digest(db=None, analysis: dict | None = None, hour_utc: int | 
         context_lines = _load_context_lines(rdb)
         # Bloque 3 — inteligencia intradía de sesión (veredicto/giros/ritmo).
         verdict_lines, giros_lines, ritmo_lines = _session_blocks(rdb, moment, assets)
+        # Bloque 5 — agenda macro: SOLO en apertura ("lo que viene hoy"); en media
+        # y tarde se omite (el parte diario de cierre ya la repite como contexto).
+        macro_lines = _macro_lines() if moment == "apertura" else []
         text = build_intraday_digest(
             state, moment=f"{moment_label} (intradía)",
             compare=compare, context_lines=context_lines,
             giros_lines=giros_lines, ritmo_lines=ritmo_lines, verdict_lines=verdict_lines,
+            macro_lines=macro_lines,
         )
         ok = _send(text, send_fn)
         result["sent"] = bool(ok)

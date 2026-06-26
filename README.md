@@ -1330,6 +1330,98 @@ bloques en el digest.
 
 ---
 
+## Bloque 5 — Calendario macro: el "por qué" del día
+
+Avisa de los **datos económicos de alto impacto** del día para que se entienda
+**POR QUÉ** puede haber movimiento en la liquidez (una decisión de tipos, la
+inflación, el empleo…). Es **contexto, no predicción**: dice qué evento hay y a
+qué hora, y que *"suele traer volatilidad"* (condicional y genérico); **nunca**
+afirma dirección de precio.
+
+```text
+📅 Agenda macro de hoy:
+  • 14:15 🇪🇺 decisión de tipos del BCE — suele traer volatilidad.
+  • 14:30 🇺🇸 PCE de EE.UU. (inflación favorita de la Fed) — suele traer volatilidad.
+```
+
+### Paso 0 — fuente verificada en vivo (decisión documentada)
+
+A diferencia de los demás bloques (que reusan datos ya ingeridos), este necesita
+una fuente de eventos económicos. Se investigaron **en vivo** tres caminos
+gratuitos:
+
+| Fuente | Veredicto |
+|--------|-----------|
+| **FRED** (St. Louis Fed) | Oficial y muy estable, pero solo da `fecha + nombre`: **sin hora, sin importancia, sin país**, y **sin FOMC ni BCE**. Insuficiente. |
+| **FMP** (Financial Modeling Prep) | Esquema completo (país, impacto, FOMC, BCE), pero requiere **API key** y su tier gratuito es de **estabilidad incierta** (ha movido el calendario a pago). |
+| **Calendario estático curado** ✅ | Fechas **oficiales** 2026 (Reserva Federal, BCE, OMB/BLS/BEA) en una tabla, consultada al vuelo. **Cero coste, cero key, no se cae nunca** (no hay API en runtime). |
+
+**Decisión (con el usuario): el calendario estático curado.** Es la opción más
+**estable** de las tres para un proyecto desatendido de coste cero, cumple todos
+los requisitos de eventos, y no añade un secreto que gestionar.
+
+> **Este bloque despierta desde el día 1** (un calendario es información de futuro
+> inmediato, no una línea base que haya que acumular).
+
+### Qué eventos (solo alto impacto USA + eurozona)
+
+- **EE.UU.:** FOMC (decisión de tipos de la Fed), IPC/CPI, empleo (NFP), PCE (la
+  inflación favorita de la Fed) y PIB (solo el **primer avance** de cada trimestre).
+- **Eurozona:** decisión de tipos del **BCE** (Consejo de Gobierno).
+- Las revisiones (2.ª/3.ª estimación del PIB) y los datos menores se **omiten** a
+  propósito (filtrar el ruido).
+
+### Hora correcta con horario de verano
+
+Cada evento se guarda en su zona **origen** (ET para EE.UU., CET para el BCE) y se
+convierte a **hora de Madrid** con `zoneinfo`, que resuelve el horario de verano —
+incluidas las **~2 semanas al año** en que los cambios de hora de EE.UU. y la UE
+no coinciden (p. ej. el IPC del 11-mar sale a las **13:30** Madrid, no 14:30; el
+FOMC del 18-mar y 28-oct a las **19:00**, no 20:00). Por eso **no** se hardcodea el
+desfase.
+
+### Dónde se muestra
+
+- **Parte diario** (cierre): la agenda de hoy enmarca el "por qué" del movimiento.
+- **Apertura intradía**: "lo que viene hoy" (donde más útil es). En media sesión y
+  tarde **no** se repite (el cierre ya la trae como contexto).
+- Si hoy no hay eventos de primer orden, el bloque **no aparece**.
+
+### Sin migración, sin API key
+
+La tabla se consulta **al vuelo** en cada ciclo (no hay nada histórico que
+persistir) → **sin migración 015**. No requiere ninguna clave ni GitHub Secret.
+
+### Mantenimiento (límite conocido, documentado)
+
+Al ser una tabla curada, hay que **refrescarla una vez al año**: añadir a
+`MACRO_EVENTS` (en `app/analysis/macro_calendar.py`) las fechas del año siguiente
+de FOMC, BCE y los datos USA (fuentes oficiales citadas en el módulo). Si la tabla
+se queda sin fechas futuras, el bloque deja de aparecer y se registra un **aviso
+en el log** (no rompe nada). Es el coste de no depender de una API de pago/incierta.
+
+### Degradación elegante (best-effort)
+
+Cualquier problema (tz no disponible, día sin eventos) → lista vacía y el bloque no
+aparece. **Nunca rompe el parte** (mismo patrón que el resto de bloques).
+
+### Dónde vive
+
+- `app/analysis/macro_calendar.py` — tabla curada + `events_on(fecha)` (puro) +
+  `todays_macro_events()` (fachada best-effort). Fuentes oficiales citadas en el
+  docstring.
+- `app/alerts/digest.py` — `render_macro_block` + `_macro_lines()`; enganchado en
+  `send_daily_digest` (siempre) y `send_intraday_digest` (solo apertura).
+
+### Tests
+
+`tests/test_macro_calendar.py` (26 tests): eventos del día correctos, conversión
+horaria con DST incluidas las semanas de desfase EE.UU./UE, solo alto impacto
+USA/eurozona (tipos no admitidos ignorados), día sin eventos → no aparece, fallo de
+fuente → degradación elegante, y la integración en el digest (diario + apertura).
+
+---
+
 ## Sesiones futuras
 
 - (todas las sesiones planificadas completadas)
