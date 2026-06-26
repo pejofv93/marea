@@ -176,6 +176,77 @@ def _cred_tag(asset: dict) -> str:
     return f" — ⚠️ {mark}" + (f" ({reason})" if reason else "")
 
 
+# ── Inteligencia intradía de sesión (Bloque 3) ────────────────────────────────
+# El análisis (veredicto/giros/ritmo) vive en app/analysis/intraday_session.py
+# (funciones puras sobre los momentos del día). Aquí solo se RENDERIZA, reutilizando
+# los nombres legibles (_name) y la graduación de intensidad (_intensity).
+_MOMENT_DAY_LABEL = {"apertura": "la apertura", "media": "la media sesión", "cierre": "el cierre"}
+
+
+def render_verdict_block(analysis, is_close: bool) -> list[str]:
+    """
+    Bloque "⚖️ Veredicto del día" — SOLO en el parte de cierre. Degrada con
+    elegancia: sin momentos suficientes lo declara; con momentos pero sin flujos
+    fuertes que juzgar, lo dice (no deja nada a medias).
+    """
+    if not is_close:
+        return []
+    header = "⚖️ <b>Veredicto del día:</b>"
+    if not getattr(analysis, "verdict_ready", False):
+        return [header, "  Sin suficientes momentos del día para dictaminar veredicto."]
+    if not analysis.verdicts:
+        return [header, "  Sin flujos fuertes en la apertura que dictaminar hoy."]
+    return [header] + [_verdict_line(v) for v in analysis.verdicts]
+
+
+def _verdict_line(v) -> str:
+    name = _name({"ticker": v.ticker})
+    early_label = _MOMENT_DAY_LABEL.get(v.early_moment, "la apertura")
+    if v.early_score >= 0:
+        head = f"En {early_label} entró capital con fuerza en {name}"
+    else:
+        head = f"En {early_label} salió capital con fuerza de {name}"
+    head += f" ({_intensity(v.early_score)}, {v.early_score:+.2f})"
+    if v.verdict == "confirmado":
+        gerund = "entrando" if v.close_score >= 0 else "saliendo"
+        tail = f"al cierre se ha CONFIRMADO: sigue {gerund} ({v.close_score:+.2f})"
+    elif v.verdict == "revertido":
+        tail = f"al cierre se ha REVERTIDO: ahora {_dir_word(v.close_score)} ({v.close_score:+.2f})"
+    else:  # agotado
+        moved = "la entrada" if v.early_score >= 0 else "la salida"
+        tail = f"al cierre se ha AGOTADO: {moved} perdió fuelle ({v.close_score:+.2f})"
+    return f"  • {head}; {tail}."
+
+
+def render_giros_block(analysis) -> list[str]:
+    """Bloque "🔄 Giros" — activos que cambian de signo. Vacío → no se muestra."""
+    if not analysis.giros:
+        return []
+    lines = ["🔄 <b>Giros:</b>"]
+    for g in analysis.giros:
+        name = _name({"ticker": g.ticker})
+        prev_dir = "entraba" if g.prev_score >= 0 else "salía"
+        now_dir = "sale" if g.now_score < 0 else "entra"
+        prev_label = _MOMENT_DAY_LABEL.get(g.prev_moment, "antes")
+        lines.append(
+            f"  • {name} {prev_dir} en {prev_label}, ahora {now_dir} — el dinero se ha "
+            f"dado la vuelta ({g.prev_score:+.2f} → {g.now_score:+.2f})."
+        )
+    return lines
+
+
+def render_ritmo_block(analysis) -> list[str]:
+    """Bloque "⚡ Ritmo" — entradas/salidas que aceleran o frenan. Vacío → no se muestra."""
+    if not analysis.ritmo:
+        return []
+    lines = ["⚡ <b>Ritmo:</b>"]
+    for r in analysis.ritmo:
+        name = _name({"ticker": r.ticker})
+        verb = "se acelera" if r.trend == "acelera" else "pierde fuelle"
+        lines.append(f"  • la {r.direction} en {name} {verb} ({r.prev_score:+.2f} → {r.now_score:+.2f}).")
+    return lines
+
+
 # ── Semáforo + titular ────────────────────────────────────────────────────────
 
 def _semaphore(assets: list[dict], regime: dict | None, cold_start: bool, rotation_strength: float) -> str:
@@ -568,11 +639,16 @@ def build_intraday_digest(
     moment: str = "Sesión USA",
     compare: dict | None = None,
     context_lines: list[str] | None = None,
+    giros_lines: list[str] | None = None,
+    ritmo_lines: list[str] | None = None,
+    verdict_lines: list[str] | None = None,
 ) -> str:
     """
     Parte INTRADÍA (versión corta). ``state`` = {assets, cold_start?}.
     Top 3 (no 5), sin bloque largo de fondo; misma exigencia en crypto/pólvora.
     ``context_lines`` = líneas del bloque "Contexto macro" (Bloque 1), o None.
+    ``giros_lines``/``ritmo_lines``/``verdict_lines`` = bloques de la inteligencia
+    intradía de sesión (Bloque 3), ya renderizados; None/[] → no se muestran.
     """
     state = state or {}
     assets = state.get("assets") or []
@@ -602,8 +678,20 @@ def build_intraday_digest(
         blocks.append(["🔴 <b>Top salidas:</b>"] + _outflow_lines(outflow, assets))
 
     blocks.append(_crypto_block(assets))
+
+    # Bloque 3 — giros y ritmo (intradía), solo si hay algo que mostrar.
+    if giros_lines:
+        blocks.append(giros_lines)
+    if ritmo_lines:
+        blocks.append(ritmo_lines)
+
     blocks.append(_compare_block(assets, compare))
     blocks.append([_who_dominates(assets)])
+
+    # Bloque 3 — veredicto del día (solo en el parte de cierre; trae su propio
+    # mensaje de degradación cuando faltan momentos).
+    if verdict_lines:
+        blocks.append(verdict_lines)
 
     ctx = _context_block(context_lines)
     if ctx:
@@ -720,9 +808,12 @@ def send_intraday_digest(db=None, analysis: dict | None = None, hour_utc: int | 
         state = {"assets": assets}
         compare = _load_prev_cycle(rdb, "intraday", moment)
         context_lines = _load_context_lines(rdb)
+        # Bloque 3 — inteligencia intradía de sesión (veredicto/giros/ritmo).
+        verdict_lines, giros_lines, ritmo_lines = _session_blocks(rdb, moment, assets)
         text = build_intraday_digest(
             state, moment=f"{moment_label} (intradía)",
             compare=compare, context_lines=context_lines,
+            giros_lines=giros_lines, ritmo_lines=ritmo_lines, verdict_lines=verdict_lines,
         )
         ok = _send(text, send_fn)
         result["sent"] = bool(ok)
@@ -837,6 +928,69 @@ def _load_prev_cycle(db, rail: str, moment: str) -> dict | None:
     return {"label": label, "scores": scores}
 
 
+def _load_today_moments(db, rail: str, exclude_moment: str | None = None) -> list[dict]:
+    """
+    Lee TODOS los momentos del día de hoy de un carril (Bloque 3): para el carril
+    intradía, un mismo día (ts = medianoche) acumula hasta apertura/media/cierre.
+    Devuelve [{moment, assets:[{ticker, score, asset_class, credibility_label}]}],
+    excluyendo el momento actual (que aún no se ha persistido). Nunca lanza: ante
+    cualquier problema devuelve [] (degradación elegante → sin veredicto/giros/ritmo).
+    """
+    try:
+        from app.ingest._base import day_ts
+
+        resp = (
+            db.table("digest_cycles")
+            .select("moment,scores")
+            .eq("rail", rail)
+            .eq("ts", day_ts())
+            .execute()
+        )
+        rows = resp.data or []
+    except Exception as e:  # noqa: BLE001
+        logger.warning("No se pudieron leer los momentos del día (%s): %s", rail, e)
+        return []
+
+    out: list[dict] = []
+    for r in rows:
+        mom = r.get("moment")
+        if not mom or mom == exclude_moment:
+            continue
+        assets = [
+            {
+                "ticker":            s.get("ticker"),
+                "score":             s.get("score"),
+                "asset_class":       s.get("asset_class"),
+                "credibility_label": s.get("credibility_label"),
+            }
+            for s in (r.get("scores") or [])
+            if isinstance(s, dict) and s.get("ticker") is not None
+        ]
+        out.append({"moment": mom, "assets": assets})
+    return out
+
+
+def _session_blocks(db, moment: str, assets: list[dict]) -> tuple[list[str], list[str], list[str]]:
+    """
+    Compone los bloques de la inteligencia intradía de sesión (Bloque 3):
+    (verdict_lines, giros_lines, ritmo_lines). Best-effort: ante cualquier fallo
+    devuelve bloques vacíos (el parte nunca se rompe ni se inventa nada).
+    """
+    try:
+        from app.analysis.intraday_session import analyze_session
+
+        prior = _load_today_moments(db, "intraday", exclude_moment=moment)
+        sa = analyze_session(prior, moment, assets)
+        return (
+            render_verdict_block(sa, is_close=(moment == "cierre")),
+            render_giros_block(sa),
+            render_ritmo_block(sa),
+        )
+    except Exception as e:  # noqa: BLE001 — la inteligencia de sesión nunca rompe el parte
+        logger.warning("Inteligencia intradía de sesión no disponible: %s", e)
+        return ([], [], [])
+
+
 def _save_cycle(db, rail: str, moment: str, assets: list[dict], regime: dict | None = None) -> None:
     """Persiste el parte actual para que el siguiente pueda compararse. Nunca lanza."""
     try:
@@ -852,6 +1006,10 @@ def _save_cycle(db, rail: str, moment: str, assets: list[dict], regime: dict | N
                     "score": a.get("score"),
                     "asset_class": a.get("asset_class"),
                     "confidence": a.get("confidence"),
+                    # Bloque 3: la inteligencia de sesión necesita saber si el
+                    # flujo base era creíble (un veredicto/giro sobre un fogonazo
+                    # no es fiable). JSONB esquema-libre → retrocompatible.
+                    "credibility_label": a.get("credibility_label"),
                 }
                 for a in (assets or [])
             ],

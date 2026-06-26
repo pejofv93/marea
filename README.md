@@ -1136,6 +1136,90 @@ penalizado guardados ambos, credibilidad ⟂ confianza, y reflejo en el digest.
 
 ---
 
+## Bloque 3 — Inteligencia INTRADÍA de sesión (con auto-activación)
+
+Ya existía una capa de comparación temporal (la "película" de la Sesión 12) que
+miraba **un** parte contra el anterior. El Bloque 3 explota los distintos
+**momentos del día** (apertura / media sesión / cierre) para tres lecturas que
+el dato de "dos fotos" no daba — todas con **auto-activación** (se encienden
+solas cuando el día acumula momentos; degradan con elegancia si faltan).
+
+### Las tres funciones
+
+| Función | Dónde aparece | Qué dice |
+|---------|---------------|----------|
+| **⚖️ Veredicto del día** (cierre-juez) | parte de **cierre** (Tarde USA) | Para los flujos **fuertes** de la apertura/media, dictamina al cierre: **CONFIRMADO** (sigue igual), **REVERTIDO** (se dio la vuelta) o **AGOTADO** (misma dirección, perdió fuelle). |
+| **🔄 Giros** | partes intradía (media, tarde) | Activos que **cambian de signo** entre dos momentos (entraba → sale), solo si tuvieron movimiento **fuerte** en al menos uno (no ruido de planos). |
+| **⚡ Ritmo** (velocidad) | partes intradía | Si la entrada/salida **se acelera** o **pierde fuelle** entre momentos consecutivos (la "derivada" del flujo). |
+
+```text
+⚖️ Veredicto del día:
+  • En la apertura entró capital con fuerza en Tecnología (fuerte, +0.85); al cierre se ha CONFIRMADO: sigue entrando (+0.88).
+  • En la apertura entró capital con fuerza en Oro (GLD) (moderada, +0.80); al cierre se ha AGOTADO: la entrada perdió fuelle (+0.25).
+🔄 Giros:
+  • TSLA entraba en la media sesión, ahora sale — el dinero se ha dado la vuelta (+0.78 → -0.62).
+⚡ Ritmo:
+  • la entrada en Oro (GLD) pierde fuelle (+0.55 → +0.25).
+```
+
+### Sin migración nueva (reutiliza digest_cycles)
+
+La capa de comparación temporal (**migración 011**, `digest_cycles`) ya persiste,
+por ciclo, los flow scores que el parte **realmente usó**, marcados con su
+`moment` y con clave única `(ts, rail, moment)`. Para el carril intradía, un
+mismo día (`ts` = medianoche) acumula hasta **tres filas** — apertura / media /
+cierre —, que **son** los momentos del día. El Bloque 3 los lee tal cual; la
+única ampliación es guardar también `credibility_label` dentro del JSONB de
+scores (esquema-libre, retrocompatible: las filas antiguas simplemente no lo
+traen). **Por eso no hace falta una migración 014.**
+
+### Auto-activación y degradación elegante
+
+- Mínimo **2 momentos del día** (`MIN_MOMENTS`) para cualquier función. Por
+  debajo (primer parte del día, o día con ciclos de cron saltados): el veredicto
+  declara *"sin suficientes momentos del día para dictaminar"* y los giros/ritmo
+  **no se muestran**. Nunca se inventa una comparación ni se rompe el parte.
+- Se mergea ya y se enciende solo a medida que el día acumula momentos. Sin
+  intervención manual futura (mismo patrón que los Bloques 1 y 2).
+
+### Respeta todo lo existente
+
+- **Score penalizado** por credibilidad (Bloque 2) como base, nunca el bruto: un
+  veredicto/giro/ritmo sobre un **fogonazo** no es fiable → se **omite**.
+- **Afirmativo** en lo observado (los giros y veredictos hablan de flujos que ya
+  pasaron); nada de salto a precio futuro.
+- **No aplica a termómetros** (`^VIX`, `CRYPTO_FNG`) — misma fuente única de verdad.
+- Regla madre **"nada a medias"**: el giro nombra el activo y las dos direcciones;
+  el veredicto cierra con confirmado/revertido/agotado; el ritmo dice acelera o frena.
+
+### Umbrales (documentados, en `intraday_session.py`)
+
+| Constante | Valor | Significado |
+|-----------|-------|-------------|
+| `STRONG_MOVE` | `0.6` | `|score|` que cuenta como movimiento **fuerte** (alineado con el umbral de flujo intradía) |
+| `RELEVANT_EPS` | `0.2` | Por debajo, el flujo es prácticamente plano (no cuenta como "ahora sale" ni como flujo vivo) |
+| `FADE_RATIO` | `0.5` | Cierre `< apertura×esto` (misma dirección) → **AGOTADO**; por encima → **CONFIRMADO** |
+| `VELOCITY_EPS` | `0.10` | Cambio mínimo de `|score|` para hablar de acelera/frena; por debajo, **estable** (no se muestra) |
+
+### Dónde vive
+
+- `app/analysis/intraday_session.py` — lógica **pura** (`analyze_session`,
+  `classify_verdict`, `classify_velocity` + detección de giros/ritmo/veredicto).
+- `app/alerts/digest.py` — renderizado (`render_verdict_block`,
+  `render_giros_block`, `render_ritmo_block`) reutilizando nombres legibles e
+  intensidad; `_load_today_moments` lee los momentos del día; `send_intraday_digest`
+  los engancha. Best-effort: si algo falla, los bloques quedan vacíos (el parte nunca se rompe).
+
+### Tests
+
+`tests/test_intraday_session.py` (47 tests): veredicto confirmado/revertido/
+agotado (incl. flujo apagado y desaparecido), giros solo en movimiento fuerte
+(ignora planos), velocidad acelera/frena/estable, auto-activación (< 2 momentos
+degrada), score penalizado (fogonazo omitido), exclusión de termómetros, y la
+integración de los tres bloques en el digest.
+
+---
+
 ## Sesiones futuras
 
 - (todas las sesiones planificadas completadas)
