@@ -1220,6 +1220,116 @@ integración de los tres bloques en el digest.
 
 ---
 
+## Bloque 4 — Detección temprana: desacoples + volumen anómalo (con auto-activación)
+
+Avisa de señales **nacientes** antes de que sean obvias. Es el bloque que **MÁS
+depende de histórico**: necesita establecer una *línea base de normalidad* antes
+de poder detectar lo anormal. Por eso **despierta más tarde que los demás — y eso
+es correcto, no un fallo**. Hasta tener base suficiente declara internamente
+*"estableciendo línea base"* y **no muestra nada** (jamás una señal falsa por
+falta de datos).
+
+### Las dos funciones
+
+| Función | Qué detecta | Cómo cierra el círculo |
+|---------|-------------|------------------------|
+| **🔗 Desacoples** | Dos activos que iban **de la mano** y se **separan** (correlación alta y estable que cae) → señal temprana de rotación. | Nombra los **dos lados** y qué hace cada uno: *"entra en oro (+0.80), sale de plata (−0.50) — el dinero rota de uno a otro."* |
+| **📊 Volumen anómalo** | Volumen muy por encima de lo **normal para el propio activo** (vs su media/σ histórica). Es una señal de **atención** ("mira aquí"), no un flujo. | Se combina con la **dirección del flujo** (score penalizado): *"4.3σ por encima de lo habitual; la atención es de ENTRADA."* |
+
+```text
+🔗 Desacoples:
+  • Oro y Plata, que se movían juntos (corr +0.92), se han desacoplado (ahora +0.08): entra en Oro (+0.80), sale de Plata (-0.50) — el dinero rota de uno a otro.
+📊 Volumen anómalo:
+  • Financieras (bancos) — volumen 4.3σ por encima de lo habitual; la atención es de ENTRADA (+0.62).
+```
+
+### Desacoples — qué se vigila
+
+- **Pares clásicos** con sentido económico (lista configurable `CLASSIC_PAIRS`):
+  oro/plata (`GC=F`/`SI=F`, `GLD`/`SLV`), S&P/Nasdaq (`^GSPC`/`^IXIC`, `SPY`/`QQQ`),
+  semis (`SOXX`/`SMH`), BTC/ETH, oro/mineras (`GLD`/`GDX`), plata/mineras
+  (`SLV`/`SIL`), defensa (`ITA`/`XAR`), bancos entre sí (`JPM`/`BAC`/`WFC`/`C`). Los
+  que el universo dinámico no haya incorporado aún degradan en silencio.
+- **Pares descubiertos:** además, se vigilan automáticamente los pares que la
+  propia matriz detecte como **fuerte y establemente correlacionados** (|corr| ≥
+  `0.85` en el histórico previo).
+- **Condición de desacople:** la correlación **BASE** (histórico estable, ventana
+  larga **EXCLUYENDO** lo reciente) era alta (`|base| ≥ 0.7`) **y** la correlación
+  **RECIENTE** (ventana corta) cae claramente (`|base − recent| ≥ 0.5`). La base
+  excluye a propósito el periodo reciente: si lo incluyera, una ruptura brusca se
+  auto-anularía y nunca saltaría.
+
+### Volumen anómalo — vs la propia línea base
+
+Para cada activo se calcula la media y σ de su volumen histórico (`raw_snapshots`)
+y se mira cuántas σ por encima está el volumen actual. Anómalo = `≥ 2.5σ`. Es
+**atención, no flujo**: la dirección (entrada/salida/solo atención) la pone el
+último flow score **penalizado**.
+
+### Auto-activación (CRÍTICA aquí)
+
+| Detección | Umbral de despertar | Tiempo aproximado |
+|-----------|---------------------|-------------------|
+| Correlación | `EARLY_CORR_MIN_OBS` (15) barras en la ventana **base** (previa a lo reciente) | ~3 semanas de histórico diario |
+| Volumen | `EARLY_VOLUME_MIN_OBS` (20) observaciones para media/σ fiables | ~4 semanas |
+
+Si **ningún** par/activo alcanza su umbral → `baseline_ready=False`, el sistema
+declara *"estableciendo línea base"* (log interno) y los bloques **no aparecen**.
+Por encima, se encienden solas. **Sin intervención manual.**
+
+### Por qué SIN migración nueva (se calcula al vuelo)
+
+Ambas detecciones se computan desde datos **ya almacenados**, sin tabla nueva:
+
+- **Desacoples:** se correlacionan las **series de flow score (penalizado)** por
+  ticker, que ya viven en `flow_scores`. Reutiliza la maquinaria de la matriz de
+  correlación (Sesión 5) sobre un pivot a nivel de **ticker** (la matriz existente
+  agrega por *clase*, lo que colapsa pares como S&P/Nasdaq o BTC/ETH en una sola
+  columna; aquí se necesita el detalle por ticker).
+- **Volumen:** la distribución histórica de volumen de cada activo ya está en
+  `raw_snapshots.volume`; media/σ se calculan al vuelo.
+
+Persistir líneas base en una tabla solo duplicaría datos ya presentes. **La
+auto-activación vive en los umbrales de observaciones, no en una tabla.**
+
+### Respeta lo existente
+
+- **Score PENALIZADO** por credibilidad (Bloque 2) como base de la dirección.
+- **Excluye termómetros** de sentimiento (`^VIX`, `CRYPTO_FNG`) de ambas
+  detecciones — un desacople del VIX o una anomalía de volumen del Fear&Greed no
+  tienen sentido. Los indicadores macro del Bloque 1 viven en `context_indicators`
+  (no en `flow_scores`/`raw_snapshots`), así que quedan fuera **por construcción**.
+- **Regla madre "nada a medias":** cada desacople nombra los dos lados; cada
+  anomalía dice de qué activo y en qué dirección apunta el flujo. Afirmativo en lo
+  observado; nunca se predice precio.
+
+### Dónde vive
+
+- `app/analysis/early_detection.py` — lógica **pura** (`build_ticker_pivot`,
+  `detect_decouples`, `detect_volume_anomalies`) + fachada
+  `evaluate_early_detection(db)` (best-effort, nunca lanza).
+- `app/alerts/digest.py` — `render_decouple_block` / `render_volume_block`
+  (reutilizan nombres legibles); `_early_blocks(db)` los carga; `send_daily_digest`
+  los engancha en el parte **diario** (la matriz y el volumen son señales diarias).
+
+### Variables de entorno (opcionales)
+
+| Variable | Default | Significado |
+|----------|---------|-------------|
+| `EARLY_CORR_MIN_OBS` | `15` | Barras en la ventana base para fiarse de una correlación |
+| `EARLY_VOLUME_MIN_OBS` | `20` | Observaciones para una media/σ de volumen fiables |
+
+### Tests
+
+`tests/test_early_detection.py` (24 tests): desacople real detectado cerrando el
+círculo (ambos lados), par no correlacionado sin falso positivo, par que sigue
+correlado, descubrimiento de pares estables, volumen anómalo vs normal con
+dirección por score penalizado, auto-activación (sin base → ninguna señal), score
+penalizado (no bruto), exclusión de termómetros, y la integración de ambos
+bloques en el digest.
+
+---
+
 ## Sesiones futuras
 
 - (todas las sesiones planificadas completadas)

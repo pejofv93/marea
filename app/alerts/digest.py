@@ -247,6 +247,63 @@ def render_ritmo_block(analysis) -> list[str]:
     return lines
 
 
+# ── Detección temprana (Bloque 4): desacoples + volumen anómalo ────────────────
+# La lógica vive en app/analysis/early_detection.py (puro). Aquí solo se renderiza,
+# reutilizando _name. Los bloques NO aparecen si no hay señal (o si aún se está
+# estableciendo la línea base): no se satura el parte.
+
+def _flow_phrase(ticker: str, score: float) -> str:
+    """'entra en Oro (+0.80)' / 'sale de Plata (-0.50)' — afirmativo en el flujo."""
+    name = _name({"ticker": ticker})
+    if score >= 0:
+        return f"entra en {name} ({score:+.2f})"
+    return f"sale de {name} ({score:+.2f})"
+
+
+def render_decouple_block(result) -> list[str]:
+    """Bloque "🔗 Desacoples" — correlaciones rompiéndose. Vacío → no se muestra."""
+    decouples = getattr(result, "decouples", None) or []
+    if not decouples:
+        return []
+    lines = ["🔗 <b>Desacoples:</b>"]
+    for d in decouples:
+        name_a = _name({"ticker": d.ticker_a})
+        name_b = _name({"ticker": d.ticker_b})
+        # Cierra el círculo: nombra los dos lados y qué hace cada uno.
+        sides = f"{_flow_phrase(d.ticker_a, d.score_a)}, {_flow_phrase(d.ticker_b, d.score_b)}"
+        # Cola CONDICIONAL solo si el flujo se separa (uno entra, otro sale).
+        opposite = (d.score_a > 0 > d.score_b) or (d.score_a < 0 < d.score_b)
+        tail = " — el dinero rota de uno a otro" if opposite else ""
+        lines.append(
+            f"  • {name_a} y {name_b}, que se movían juntos (corr {d.base_corr:+.2f}), se han "
+            f"desacoplado (ahora {d.recent_corr:+.2f}): {sides}{tail}."
+        )
+    return lines
+
+
+_ANOMALY_DIR = {
+    "inflow":  "la atención es de ENTRADA",
+    "outflow": "la atención es de SALIDA",
+    "neutral": "sin dirección de flujo clara (solo atención)",
+}
+
+
+def render_volume_block(result) -> list[str]:
+    """Bloque "📊 Volumen anómalo" — volúmenes fuera de lo normal. Vacío → no se muestra."""
+    anomalies = getattr(result, "anomalies", None) or []
+    if not anomalies:
+        return []
+    lines = ["📊 <b>Volumen anómalo:</b>"]
+    for a in anomalies:
+        name = _name({"ticker": a.ticker})
+        dir_txt = _ANOMALY_DIR.get(a.direction, _ANOMALY_DIR["neutral"])
+        score_txt = f" ({a.score:+.2f})" if a.direction != "neutral" else ""
+        lines.append(
+            f"  • {name} — volumen {a.sigma:.1f}σ por encima de lo habitual; {dir_txt}{score_txt}."
+        )
+    return lines
+
+
 # ── Semáforo + titular ────────────────────────────────────────────────────────
 
 def _semaphore(assets: list[dict], regime: dict | None, cold_start: bool, rotation_strength: float) -> str:
@@ -563,11 +620,15 @@ def build_daily_digest(
     now_label: str = "Cierre de mercado",
     compare: dict | None = None,
     context_lines: list[str] | None = None,
+    decouple_lines: list[str] | None = None,
+    volume_lines: list[str] | None = None,
 ) -> str:
     """
     Parte DIARIO completo. ``state`` = {assets, regime, cold_start, rotations}.
     ``compare`` = {label, scores:{ticker:score}} del parte anterior (o None).
     ``context_lines`` = líneas del bloque "Contexto macro" (Bloque 1), o None.
+    ``decouple_lines``/``volume_lines`` = bloques de detección temprana (Bloque 4),
+    ya renderizados; None/[] → no se muestran (no se satura el parte).
     """
     state = state or {}
     assets = state.get("assets") or []
@@ -622,6 +683,13 @@ def build_daily_digest(
     ctx = _context_block(context_lines)
     if ctx:
         blocks.append(ctx)
+
+    # 9c. Detección temprana (Bloque 4) — desacoples + volumen anómalo. Solo
+    #     aparecen si hay señal y la línea base ya está establecida.
+    if decouple_lines:
+        blocks.append(decouple_lines)
+    if volume_lines:
+        blocks.append(volume_lines)
 
     # (color) narrativa Groq, opcional
     snippet = _narrative_snippet(narrative)
@@ -728,6 +796,21 @@ def _load_context_lines(db) -> list[str]:
         return []
 
 
+def _early_blocks(db) -> tuple[list[str], list[str]]:
+    """
+    Bloques de detección temprana (Bloque 4): (decouple_lines, volume_lines).
+    Best-effort: ante cualquier fallo o línea base aún no establecida devuelve
+    bloques vacíos (no se muestran). El parte nunca se rompe.
+    """
+    try:
+        from app.analysis.early_detection import evaluate_early_detection
+        result = evaluate_early_detection(db)
+        return render_decouple_block(result), render_volume_block(result)
+    except Exception as e:  # noqa: BLE001 — la detección temprana nunca rompe el parte
+        logger.warning("Detección temprana no disponible para el parte: %s", e)
+        return [], []
+
+
 def _send(text: str, send_fn=None) -> bool:
     """Envía vía Telegram reutilizando el cliente existente. send_fn inyectable en tests."""
     if send_fn is not None:
@@ -768,9 +851,11 @@ def send_daily_digest(db=None, now_label: str = "Cierre de mercado", send_fn=Non
         compare = _load_prev_cycle(rdb, "daily", moment)
         narrative = _latest_narrative(rdb)
         context_lines = _load_context_lines(rdb)
+        decouple_lines, volume_lines = _early_blocks(rdb)
         text = build_daily_digest(
             state, narrative=narrative, now_label=now_label,
             compare=compare, context_lines=context_lines,
+            decouple_lines=decouple_lines, volume_lines=volume_lines,
         )
         ok = _send(text, send_fn)
         result["sent"] = bool(ok)

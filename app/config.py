@@ -37,6 +37,12 @@ class Settings(BaseSettings):
     # PERSISTENCIA se auto-activa al superar este nº de observaciones; por debajo,
     # la credibilidad se calcula solo con volumen+precio (activos desde el día 1).
     credibility_persist_min_obs: int = 10
+    # Detección temprana (Bloque 4) — desacoples + volumen anómalo. Es el bloque
+    # que MÁS depende de histórico (necesita una línea base de normalidad), así que
+    # DESPIERTA MÁS TARDE por diseño: hasta acumular estas observaciones no muestra
+    # nada (declara "estableciendo línea base"). Nunca señales falsas por falta de datos.
+    early_corr_min_obs: int = 15      # barras en la ventana base para fiarse de una correlación
+    early_volume_min_obs: int = 20    # observaciones para una media/σ de volumen fiables
 
     model_config = SettingsConfigDict(
         env_file=".env",
