@@ -13,7 +13,11 @@ Garantías verificadas:
   (g) NINGÚN test hace llamadas reales (ni Telegram, ni APIs): todo mockeado.
 """
 
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+import yaml
 
 from scripts import _common
 from scripts._common import run_cycle, run_step
@@ -200,11 +204,13 @@ def test_daily_steps_invocan_los_engines_correctos():
 
 
 def test_main_intraday_devuelve_exit_code(monkeypatch):
-    # main() no debe hacer llamadas reales: mockeamos build_steps con pasos ok.
+    # main() no debe hacer llamadas reales: mockeamos build_steps con pasos ok
+    # y la guarda anti-duplicado (que tocaría la BD) para que NO omita.
     monkeypatch.setattr(
         run_intraday_cycle, "build_steps",
         lambda: [("falso", lambda: {"ok": True})],
     )
+    monkeypatch.setattr(run_intraday_cycle, "_guard_skips", lambda: False)
     assert run_intraday_cycle.main() == 0
 
 
@@ -215,3 +221,138 @@ def test_main_daily_propaga_fallo(monkeypatch):
     )
     with patch("app.alerts.telegram.send_message", return_value=True):
         assert run_daily_cycle.main() == 1
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# GUARDA anti-duplicado intradía (red de seguridad de los GRUPOS de cron)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _fake_db_with_last_ts(ts_iso):
+    """db falso cuya última fila de raw_snapshots_intraday tiene ts=ts_iso.
+    Pasa ts_iso=None para simular tabla vacía."""
+    db = MagicMock()
+    rows = [] if ts_iso is None else [{"ts": ts_iso}]
+    db.table.return_value.select.return_value.order.return_value.limit.return_value.execute.return_value.data = rows
+    return db
+
+
+_NOW = datetime(2026, 6, 26, 14, 0, tzinfo=timezone.utc)
+
+
+def test_recently_ran_true_si_hubo_ejecucion_reciente():
+    # Última ingesta hace 10 min → dentro de la ventana de 30 → omitir (True).
+    last = (_NOW - timedelta(minutes=10)).isoformat()
+    db = _fake_db_with_last_ts(last)
+    assert run_intraday_cycle.recently_ran(db, now=_NOW) is True
+
+
+def test_recently_ran_false_si_la_ultima_es_antigua():
+    # Última ingesta hace 45 min → fuera de la ventana → procesar (False).
+    last = (_NOW - timedelta(minutes=45)).isoformat()
+    db = _fake_db_with_last_ts(last)
+    assert run_intraday_cycle.recently_ran(db, now=_NOW) is False
+
+
+def test_recently_ran_false_en_el_borde():
+    # Exactamente en el límite (30 min) NO cuenta como reciente → procesar.
+    last = (_NOW - timedelta(minutes=run_intraday_cycle.GUARD_WINDOW_MINUTES)).isoformat()
+    db = _fake_db_with_last_ts(last)
+    assert run_intraday_cycle.recently_ran(db, now=_NOW) is False
+
+
+def test_recently_ran_false_si_tabla_vacia():
+    # Sin datos previos (primer ciclo) → nunca omite.
+    db = _fake_db_with_last_ts(None)
+    assert run_intraday_cycle.recently_ran(db, now=_NOW) is False
+
+
+def test_recently_ran_false_si_la_lectura_de_bd_falla():
+    # Si no podemos comprobar la BD, procedemos (no perder un ciclo por un fallo).
+    db = MagicMock()
+    db.table.return_value.select.return_value.order.return_value.limit.return_value.execute.side_effect = RuntimeError("bd caída")
+    assert run_intraday_cycle.recently_ran(db, now=_NOW) is False
+
+
+def test_recently_ran_false_si_ts_futuro():
+    # Un ts en el futuro (reloj desfasado) no debe bloquear el ciclo.
+    last = (_NOW + timedelta(minutes=5)).isoformat()
+    db = _fake_db_with_last_ts(last)
+    assert run_intraday_cycle.recently_ran(db, now=_NOW) is False
+
+
+def test_recently_ran_acepta_sufijo_z():
+    # Postgres a veces devuelve 'Z' en vez de '+00:00'; debe parsearse igual.
+    last = (_NOW - timedelta(minutes=5)).replace(tzinfo=None).isoformat() + "Z"
+    db = _fake_db_with_last_ts(last)
+    assert run_intraday_cycle.recently_ran(db, now=_NOW) is True
+
+
+def test_main_omite_limpio_si_guarda_detecta_duplicado(monkeypatch):
+    # Si la guarda dice "ya se ejecutó hace poco": exit 0, sin construir pasos,
+    # sin enviar ningún parte.
+    def _no_debe_llamarse():
+        raise AssertionError("build_steps no debe ejecutarse si la guarda omite")
+
+    monkeypatch.setattr(run_intraday_cycle, "_guard_skips", lambda: True)
+    monkeypatch.setattr(run_intraday_cycle, "build_steps", _no_debe_llamarse)
+
+    assert run_intraday_cycle.main() == 0
+
+
+def test_main_procede_si_guarda_no_detecta_duplicado(monkeypatch):
+    # Si la guarda NO omite, el ciclo corre con normalidad (exit 0).
+    calls = []
+    monkeypatch.setattr(run_intraday_cycle, "_guard_skips", lambda: False)
+    monkeypatch.setattr(
+        run_intraday_cycle, "build_steps",
+        lambda: [("falso", lambda: calls.append("corrió") or {"ok": True})],
+    )
+    assert run_intraday_cycle.main() == 0
+    assert calls == ["corrió"]
+
+
+def test_guard_skips_no_bloquea_si_bd_no_disponible(monkeypatch):
+    # Si get_db casca (sin credenciales), la guarda NO debe bloquear el ciclo.
+    monkeypatch.setattr("app.db.get_db", lambda: (_ for _ in ()).throw(RuntimeError("sin bd")))
+    assert run_intraday_cycle._guard_skips() is False
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# GRUPOS de cron de intraday.yml — bien escritos y completos
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _load_intraday_schedule():
+    yml = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "intraday.yml"
+    data = yaml.safe_load(yml.read_text(encoding="utf-8"))
+    # OJO: YAML 1.1 interpreta la clave `on:` como el booleano True.
+    on_block = data.get("on", data.get(True))
+    crons = [item["cron"] for item in on_block["schedule"]]
+    return on_block, crons
+
+
+def test_intraday_cron_grupos_exactos():
+    _on, crons = _load_intraday_schedule()
+    assert crons == [
+        # Grupo apertura USA (~15:30 ES verano)
+        "30 13 * * *", "45 13 * * *", "0 14 * * *",
+        # Grupo media sesión (~18:00 ES verano)
+        "0 16 * * *", "15 16 * * *",
+        # Grupo tarde/cierre USA (~22:00 ES verano)
+        "0 20 * * *", "15 20 * * *",
+    ]
+
+
+def test_intraday_cron_estan_bien_escritos():
+    _on, crons = _load_intraday_schedule()
+    for c in crons:
+        fields = c.split()
+        assert len(fields) == 5, f"cron mal formado: {c!r}"
+        minute, hour = int(fields[0]), int(fields[1])
+        assert 0 <= minute <= 59, f"minuto fuera de rango en {c!r}"
+        assert 0 <= hour <= 23, f"hora fuera de rango en {c!r}"
+        assert fields[2:] == ["*", "*", "*"], f"se esperaba diario en {c!r}"
+
+
+def test_intraday_mantiene_workflow_dispatch():
+    on_block, _crons = _load_intraday_schedule()
+    assert "workflow_dispatch" in on_block

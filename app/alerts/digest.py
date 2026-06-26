@@ -802,8 +802,8 @@ def _latest_narrative(db) -> str | None:
 def _intraday_moment(hour_utc: int | None = None) -> str:
     """
     Deriva el momento del día desde la hora UTC del ciclo.
-    Cron (verano): 13:30→apertura, 16:00→media sesión, 18:00→tarde.
-    (En invierno serían 12/15/17 UTC, que caen en los mismos tramos.)
+    Cron (verano): 13/14→apertura, 16→media sesión, 20→tarde.
+    (En invierno serían 12/13, 15 y 19 UTC, que caen en los mismos tramos.)
     """
     if hour_utc is None:
         from datetime import datetime, timezone

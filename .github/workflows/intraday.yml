@@ -1,8 +1,8 @@
 name: MAREA — Ciclo intradía
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Ejecuta la cadena intradía (ingesta → scores → análisis → alertas) tres veces
-# al día, coincidiendo con la sesión de EE. UU.
+# Ejecuta la cadena intradía (ingesta → scores → análisis → alertas) en torno a
+# tres momentos clave de la sesión de EE. UU.
 #
 # Los horarios objetivo están en hora ESPAÑOLA PENINSULAR. El cron de GitHub
 # Actions SIEMPRE va en UTC. La conversión de abajo asume horario de VERANO
@@ -12,20 +12,43 @@ name: MAREA — Ciclo intradía
 #   ───────────────────────────       ──────────
 #   15:30  apertura USA            →   13:30
 #   18:00  media sesión USA        →   16:00
-#   20:00  tarde USA               →   18:00
+#   20:00  tarde/cierre USA        →   20:00
+#
+# ⚠️ POR QUÉ HAY GRUPOS DE CRON (no uno solo por momento):
+#    El scheduler de GitHub Actions NO es puntual ni fiable: bajo carga puede
+#    RETRASAR o directamente SALTARSE una ejecución programada (no hay garantía
+#    de disparo). Un único cron por momento significa que, si GitHub se salta
+#    ese minuto, perdemos el ciclo entero (nos pasó con la apertura USA).
+#
+#    Como NO queremos depender de disparadores externos, ponemos VARIOS cron
+#    juntos alrededor de cada momento, a modo de RED DE SEGURIDAD: con que
+#    GitHub dispare UNO de los del grupo, el ciclo se ejecuta. Para que dos cron
+#    del mismo grupo no procesen dos veces, el script lleva una GUARDA
+#    anti-duplicado (ver scripts/run_intraday_cycle.py): si detecta que ya se
+#    ejecutó un ciclo intradía en los últimos ~30 min, termina limpiamente sin
+#    volver a enviar parte. Así "varios cron" = más cobertura, nunca duplicados.
 #
 # ⚠️ HORARIO DE INVIERNO: del último domingo de octubre al último de marzo,
 #    España pasa a CET = UTC+1. Entonces estos cron se "adelantan" una hora
 #    en hora local (p. ej. 13:30 UTC serían las 14:30 españolas, no las 15:30).
-#    Para mantener los horarios locales en invierno, RESTA una hora a cada
-#    minuto/hora UTC de abajo: 12:30, 15:00 y 17:00 UTC respectivamente.
+#    Para mantener los horarios locales en invierno, RESTA UNA HORA a CADA
+#    minuto/hora UTC de abajo (todos los del grupo): el grupo de apertura
+#    pasaría a 12:30/12:45/13:00, el de media a 15:00/15:15, y el de tarde a
+#    19:00/19:15 UTC.
 # ─────────────────────────────────────────────────────────────────────────────
 
 on:
   schedule:
-    - cron: "30 13 * * *"   # 15:30 España (verano) — apertura USA
-    - cron: "0 16 * * *"    # 18:00 España (verano) — media sesión USA
-    - cron: "0 18 * * *"    # 20:00 España (verano) — tarde USA
+    # ── Grupo APERTURA USA (~15:30 España, verano) ───────────────────────────
+    - cron: "30 13 * * *"   # 15:30 ES — disparo principal de apertura
+    - cron: "45 13 * * *"   # 15:45 ES — red de seguridad (+15 min)
+    - cron: "0 14 * * *"    # 16:00 ES — red de seguridad (+30 min)
+    # ── Grupo MEDIA SESIÓN USA (~18:00 España, verano) ───────────────────────
+    - cron: "0 16 * * *"    # 18:00 ES — disparo principal de media sesión
+    - cron: "15 16 * * *"   # 18:15 ES — red de seguridad (+15 min)
+    # ── Grupo TARDE/CIERRE USA (~22:00 España, verano) ───────────────────────
+    - cron: "0 20 * * *"    # 22:00 ES — disparo principal de tarde/cierre
+    - cron: "15 20 * * *"   # 22:15 ES — red de seguridad (+15 min)
   workflow_dispatch:          # permite lanzarlo a mano desde la pestaña «Actions»
 
 # Evita solapes si una ejecución se alarga más que el hueco hasta la siguiente.
