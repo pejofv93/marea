@@ -57,10 +57,13 @@ _DELTA_MIN = 0.10
 #   En COLD START nunca se pinta 🔴 (los datos no son fiables): por defecto 🟡,
 #   y 🟢 solo si de verdad todo está plano.
 
-# Activos que son TERMÓMETROS de sentimiento, no vasijas de liquidez: el VIX y el
-# Fear&Greed no "reciben dinero". Se excluyen de rankings/destino/quién-manda para
-# no escribir frases como "el capital se fue al VIX".
-_SENTIMENT = {"^VIX", "CRYPTO_FNG"}
+# Activos que son TERMÓMETROS de sentimiento / macro informativo, no vasijas de
+# liquidez: el VIX y el Fear&Greed no "reciben dinero". Se excluyen de
+# rankings/destino/quién-manda para no escribir frases como "el capital se fue al
+# VIX". FUENTE ÚNICA DE VERDAD: también la reutiliza el motor de alertas
+# (app/alerts/rules.py) para no disparar señales de flujo sobre estos activos.
+SENTIMENT_TICKERS = {"^VIX", "CRYPTO_FNG"}
+_SENTIMENT = SENTIMENT_TICKERS   # alias interno retrocompatible
 
 _STABLE_TICKERS = {"STABLES_USDT", "STABLES_USDC"}
 _CRYPTO_TICKERS = {"BTC", "ETH", "BTC-USD", "ETH-USD", "BTC_PERP", "ETH_PERP", "IBIT"}

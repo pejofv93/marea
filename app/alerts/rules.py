@@ -15,6 +15,11 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 
+# Termómetros de sentimiento / macro informativo (CRYPTO_FNG, ^VIX): NO son
+# flujos de liquidez, así que no deben disparar alertas de inflow/outflow.
+# Reutilizamos la MISMA lista que ya excluye el digest (fuente única de verdad).
+from app.alerts.digest import SENTIMENT_TICKERS
+
 logger = logging.getLogger("marea.alerts.rules")
 
 
@@ -65,6 +70,8 @@ def check_flow_extreme(db, threshold: float = 0.7) -> list[PotentialAlert]:
             continue
         assets_info = row.get("assets") or {}
         ticker = assets_info.get("ticker") or str(row.get("asset_id", "?"))
+        if ticker in SENTIMENT_TICKERS:
+            continue  # termómetro de sentimiento, no flujo: no dispara alerta
         conf_str = row.get("confidence") or "normal"
         # La confidence numérica para el filtro de envío: low=0.2, normal=0.8
         conf_num = 0.2 if conf_str == "low" else 0.8
@@ -115,7 +122,7 @@ def get_current_extreme_tickers(db, threshold: float = 0.7) -> set[str]:
         if abs(score) > threshold:
             assets_info = row.get("assets") or {}
             ticker = assets_info.get("ticker")
-            if ticker:
+            if ticker and ticker not in SENTIMENT_TICKERS:
                 result.add(ticker)
     return result
 
@@ -297,6 +304,8 @@ def check_intraday_flow(
             continue
         assets_info = row.get("assets") or {}
         ticker   = assets_info.get("ticker") or str(row.get("asset_id", "?"))
+        if ticker in SENTIMENT_TICKERS:
+            continue  # termómetro de sentimiento, no flujo: no dispara alerta
         conf_str = row.get("confidence") or "low"
         conf_num = 0.2 if conf_str == "low" else 0.8
         direction = "inflow" if score > 0 else "outflow"
@@ -354,7 +363,7 @@ def get_current_intraday_extreme_tickers(
         if abs(score) > threshold:
             assets_info = row.get("assets") or {}
             ticker = assets_info.get("ticker")
-            if ticker:
+            if ticker and ticker not in SENTIMENT_TICKERS:
                 result.add(ticker)
     return result
 

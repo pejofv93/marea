@@ -600,6 +600,38 @@ class TestIntradayAlerts:
         assert len(alerts) == 1
         assert alerts[0].confidence == 0.2   # low → 0.2
 
+    def test_excludes_sentiment_thermometers(self):
+        """CRYPTO_FNG y ^VIX (termómetros de sentimiento) NO generan alerta de
+        flujo intradía aunque su |score| supere el umbral; un flujo real sí."""
+        from app.alerts.rules import check_intraday_flow
+
+        scores = [
+            _intraday_score(1, "CRYPTO_FNG", score=-0.92, confidence="ok"),
+            _intraday_score(2, "^VIX", score=0.88, confidence="ok"),
+            _intraday_score(3, "SOXX", score=0.85, confidence="ok"),  # control
+        ]
+        db = _make_db(flow_scores_intraday=scores)
+
+        alerts = check_intraday_flow(db, threshold=0.6, interval="60m")
+        entities = {a.entity for a in alerts}
+        assert "CRYPTO_FNG" not in entities
+        assert "^VIX" not in entities
+        assert entities == {"SOXX"}
+
+    def test_rearm_excludes_sentiment_thermometers(self):
+        """El conjunto de 'extremos' para el re-arm tampoco incluye termómetros."""
+        from app.alerts.rules import get_current_intraday_extreme_tickers
+
+        scores = [
+            _intraday_score(1, "CRYPTO_FNG", score=-0.92, confidence="ok"),
+            _intraday_score(2, "SOXX", score=0.85, confidence="ok"),
+        ]
+        db = _make_db(flow_scores_intraday=scores)
+
+        result = get_current_intraday_extreme_tickers(db, threshold=0.6, interval="60m")
+        assert "CRYPTO_FNG" not in result
+        assert "SOXX" in result
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # (i) Re-arm intraday_flow

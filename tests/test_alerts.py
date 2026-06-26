@@ -358,6 +358,31 @@ class TestRules:
         assert "BTC" in result
         assert "ETH" not in result
 
+    def test_flow_extreme_excludes_sentiment_thermometers(self):
+        """CRYPTO_FNG y ^VIX son termómetros de sentimiento, no flujo:
+        aunque su |score| sea extremo, NO deben generar alerta de flujo."""
+        from app.alerts.rules import check_flow_extreme
+        db = _make_db(flow_scores=[
+            _score_row("CRYPTO_FNG", -0.95),
+            _score_row("^VIX", 0.9),
+            _score_row("BTC", 0.82),   # control: un flujo real sí dispara
+        ])
+        alerts = check_flow_extreme(db, threshold=0.7)
+        entities = {a.entity for a in alerts}
+        assert "CRYPTO_FNG" not in entities
+        assert "^VIX" not in entities
+        assert entities == {"BTC"}
+
+    def test_get_current_extreme_tickers_excludes_sentiment(self):
+        from app.alerts.rules import get_current_extreme_tickers
+        db = _make_db(flow_scores=[
+            _score_row("CRYPTO_FNG", -0.95),
+            _score_row("BTC", 0.9),
+        ])
+        result = get_current_extreme_tickers(db, threshold=0.7)
+        assert "CRYPTO_FNG" not in result
+        assert "BTC" in result
+
     def test_regime_change_detects_transition(self):
         """(b) Cambio de régimen: prev distinto de actual → alerta."""
         from app.alerts.rules import check_regime_change
