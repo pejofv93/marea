@@ -1040,6 +1040,102 @@ omitido.
 
 ---
 
+## Bloque 2 — Credibilidad del flujo (con auto-activación)
+
+Los flow scores salían casi siempre de **un** proxy (volumen). El volumen solo
+no distingue un flujo **sano** (volumen + precio acompañando + sostenido) de un
+**fogonazo** (pico aislado, o volumen sin que el precio confirme). Esta capa
+cruza señales para juzgar la **credibilidad** del flujo, **penaliza** el score
+cuando no está confirmado y **explica** la etiqueta en los partes.
+
+### Las tres señales
+
+| Señal | Disponible | Qué aporta |
+|-------|-----------|------------|
+| **Volumen** | día 1 | Base del score actual (`score_raw`). |
+| **Confirmación de precio** | **día 1** (sin histórico) | ¿El precio se mueve en la dirección del flujo? Acompaña = creíble; plano = sospechoso (absorción); en contra = dudoso (distribución). Usa el cambio de precio de la misma ventana ya ingerida. |
+| **Persistencia** | **auto-activada** (≥ `CREDIBILITY_PERSIST_MIN_OBS` obs) | ¿El flujo se sostiene varias barras o es un pico aislado? Por debajo del umbral **no influye** y no se menciona (degradación elegante). |
+
+### Cómo se combina
+
+```text
+credibility   = price_factor × persistence_factor      (∈ [0..1])
+score (final) = score_raw × credibility
+```
+
+- Volumen+precio coherentes → `price_factor = 1.0`. Precio plano → `0.6`.
+  Precio en contra → `0.4`.
+- Persistencia: sostenido → `1.0`; pico aislado → hasta `0.6`. Inactiva → `1.0`
+  (no penaliza).
+- Etiqueta por umbral: `credibility ≥ 0.8` → **confirmado**; `≥ 0.5` →
+  **dudoso**; `< 0.5` → **fogonazo**.
+
+Se guardan **ambos**: `score` (ya penalizado, lo que consumen rankings, régimen
+y alertas → quedan limpios de fogonazos sin más cambios) y `score_raw` (bruto),
+más `credibility`, `credibility_label` y `credibility_reason` para auditoría y
+para el digest.
+
+### Credibilidad ≠ confianza (cold start) — son dos cosas distintas
+
+| | Mide | Eje |
+|--|------|-----|
+| **`confidence`** (`ok`/`low`) | ¿Tengo **suficiente histórico**? | Calidad de los datos |
+| **`credibility`** (`[0..1]` + etiqueta) | ¿Es **creíble este flujo concreto**? | Calidad de la señal |
+
+Son independientes: un flujo puede tener histórico de sobra (`confidence=ok`) y
+aun así ser un fogonazo (`credibility` baja), y al revés. Por eso viven en
+columnas separadas y se calculan por separado.
+
+### A qué aplica
+
+Solo a estrategias de **flujo con volumen+precio**: acciones/ETFs/commodities
+(`VolumeFlowStrategy`) y crypto (`CryptoVolumeStrategy`) — donde la confirmación
+de precio es especialmente valiosa (el z-score de volumen de crypto no
+incorpora la dirección del precio). **No** aplica a termómetros/contexto
+(`^VIX`, `CRYPTO_FNG`, DXY, bono 10Y) ni a stablecoins (su cambio de supply es
+una medición directa del flujo, no un proxy de volumen con precio que confirmar).
+
+### Ambos carriles
+
+- **Diario**: credibilidad por volumen+precio; la persistencia diaria se activa
+  al acumular ~2 semanas de histórico.
+- **Intradía**: igual, pero la persistencia es **especialmente valiosa** aquí
+  (flujo sostenido durante la sesión vs fogonazo de una sola barra), aprovechando
+  las barras intradía.
+
+### Reflejo en los partes
+
+Los rankings ya vienen con el score **penalizado** (limpios de fogonazos). La
+etiqueta se muestra **solo cuando aporta avisar** — flujo dudoso o fogonazo:
+
+```text
+  ▲ Semiconductores (SOXX) — moderada, +0.55 — ⚠️ posible fogonazo (precio plano…)
+  ▼ Bitcoin — moderada, -0.60 → … — ⚠️ sin confirmar (precio en contra del flujo)
+```
+
+Lo **confirmado** va discreto (sin marca) para no saturar el parte.
+
+### Nueva migración
+
+```text
+migrations/013_credibility.sql   ← columnas score_raw/credibility/label/reason (NO toca anteriores)
+```
+
+### Variable de entorno (opcional)
+
+| Variable | Default | Significado |
+|----------|---------|-------------|
+| `CREDIBILITY_PERSIST_MIN_OBS` | `10` | Observaciones mínimas para activar la señal de persistencia |
+
+### Tests
+
+`tests/test_credibility.py` (18 tests): volumen+precio coherente/plano/contra,
+persistencia auto-activada (bajo umbral no influye; pico aislado penaliza,
+sostenido no), etiqueta correcta, no aplica a termómetros, score bruto y
+penalizado guardados ambos, credibilidad ⟂ confianza, y reflejo en el digest.
+
+---
+
 ## Sesiones futuras
 
 - (todas las sesiones planificadas completadas)

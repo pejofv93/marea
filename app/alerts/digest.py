@@ -157,6 +157,25 @@ def _fmt(asset: dict) -> str:
     return f"{_name(asset)} ({_intensity(s)}, {s:+.2f})"
 
 
+# ── Etiqueta de credibilidad (Bloque 2) ───────────────────────────────────────
+# El score de los rankings YA viene penalizado por credibilidad. La etiqueta se
+# muestra SOLO cuando aporta avisar: flujo DUDOSO o posible FOGONAZO. Lo
+# 'confirmado' va discreto (sin marca) para no saturar el parte.
+_CRED_MARK = {
+    "fogonazo": "posible fogonazo",
+    "dudoso":   "sin confirmar",
+}
+
+
+def _cred_tag(asset: dict) -> str:
+    """Sufijo ' — ⚠️ posible fogonazo (motivo)' si el flujo es dudoso/fogonazo; '' si no."""
+    mark = _CRED_MARK.get(asset.get("credibility_label"))
+    if not mark:
+        return ""
+    reason = (asset.get("credibility_reason") or "").strip()
+    return f" — ⚠️ {mark}" + (f" ({reason})" if reason else "")
+
+
 # ── Semáforo + titular ────────────────────────────────────────────────────────
 
 def _semaphore(assets: list[dict], regime: dict | None, cold_start: bool, rotation_strength: float) -> str:
@@ -208,6 +227,11 @@ def _top_outflow(assets: list[dict], n: int) -> list[dict]:
     return sorted([a for a in _flow_assets(assets) if _score(a) < 0], key=_score)[:n]
 
 
+def _inflow_line(a: dict) -> str:
+    """Línea del ranking de entradas, con etiqueta de credibilidad si procede."""
+    return f"  ▲ {_name(a)} — {_intensity(_score(a))}, {_score(a):+.2f}{_cred_tag(a)}"
+
+
 def _outflow_lines(outflow: list[dict], assets: list[dict]) -> list[str]:
     """Líneas del ranking de salidas; cada salida ≥ moderada se cierra con destino."""
     lines = []
@@ -215,6 +239,7 @@ def _outflow_lines(outflow: list[dict], assets: list[dict]) -> list[str]:
         base = f"  ▼ {_name(a)} — {_intensity(_score(a))}, {_score(a):+.2f}"
         if abs(_score(a)) >= _MODERATE:
             base += f" → {_infer_destination(a.get('ticker'), assets)}"
+        base += _cred_tag(a)
         lines.append(base)
     return lines
 
@@ -291,7 +316,7 @@ def _crypto_block(assets: list[dict]) -> list[str]:
     )
     if cryptos:
         frag = "; ".join(
-            f"{_name(a)} {_dir_word(_score(a))} ({_intensity(_score(a))}, {_score(a):+.2f})"
+            f"{_name(a)} {_dir_word(_score(a))} ({_intensity(_score(a))}, {_score(a):+.2f}){_cred_tag(a)}"
             for a in cryptos[:4]
         )
         lines = [f"💰 <b>En crypto:</b> {frag}."]
@@ -502,8 +527,7 @@ def build_daily_digest(
     # 4. Más entrada de liquidez (TOP 5)
     inflow = _top_inflow(assets, 5)
     if inflow:
-        blocks.append(["🟢 <b>Más entrada de liquidez:</b>"]
-                      + [f"  ▲ {_name(a)} — {_intensity(_score(a))}, {_score(a):+.2f}" for a in inflow])
+        blocks.append(["🟢 <b>Más entrada de liquidez:</b>"] + [_inflow_line(a) for a in inflow])
 
     # 5. Más salida de liquidez (TOP 5) — cada salida FUERTE/MODERADA se cierra
     #    con su destino inferido o un "en espera" explícito (no dejar a medias).
@@ -571,8 +595,7 @@ def build_intraday_digest(
 
     inflow = _top_inflow(assets, 3)
     if inflow:
-        blocks.append(["🟢 <b>Top entradas:</b>"]
-                      + [f"  ▲ {_name(a)} — {_intensity(_score(a))}, {_score(a):+.2f}" for a in inflow])
+        blocks.append(["🟢 <b>Top entradas:</b>"] + [_inflow_line(a) for a in inflow])
 
     outflow = _top_outflow(assets, 3)
     if outflow:
@@ -724,7 +747,10 @@ def _load_daily_assets(db) -> list[dict]:
     try:
         resp = (
             db.table("flow_scores")
-            .select("asset_id,ts,win,score,confidence,assets(ticker,name,asset_class,sector)")
+            .select(
+                "asset_id,ts,win,score,confidence,credibility_label,credibility_reason,"
+                "assets(ticker,name,asset_class,sector)"
+            )
             .eq("win", "7d")
             .order("ts", desc=True)
             .limit(500)
@@ -750,6 +776,8 @@ def _load_daily_assets(db) -> list[dict]:
             "sector": ai.get("sector"),
             "score": round(float(row.get("score") or 0.0), 3),
             "confidence": row.get("confidence", "low"),
+            "credibility_label": row.get("credibility_label"),
+            "credibility_reason": row.get("credibility_reason"),
         })
     return out
 
@@ -765,6 +793,8 @@ def _assets_from_movements(analysis: dict | None) -> list[dict]:
             "sector": None,
             "score": round(float(m.get("score") or 0.0), 3),
             "confidence": m.get("confidence", "low"),
+            "credibility_label": m.get("credibility_label"),
+            "credibility_reason": m.get("credibility_reason"),
         })
     return out
 

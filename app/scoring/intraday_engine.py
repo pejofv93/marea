@@ -78,10 +78,12 @@ class IntradayScoreEngine:
         db=None,
         interval: str | None = None,
         min_obs: int = MIN_OBS_DEFAULT,
+        persist_min_obs: int | None = None,
     ):
         self._db = db
         self._interval = interval
         self._min_obs = min_obs
+        self._persist_min_obs_override = persist_min_obs
 
     @property
     def db(self):
@@ -89,6 +91,13 @@ class IntradayScoreEngine:
             return self._db
         from app.db import get_db
         return get_db()
+
+    @property
+    def _persist_min_obs(self) -> int:
+        if self._persist_min_obs_override is not None:
+            return self._persist_min_obs_override
+        from app.config import settings
+        return settings.credibility_persist_min_obs
 
     @property
     def interval(self) -> str:
@@ -116,6 +125,7 @@ class IntradayScoreEngine:
                 try:
                     rows     = self._load_snapshots(asset_id)
                     strategy = get_strategy(a_class, sector)
+                    applies_cred = getattr(strategy, "applies_credibility", False)
                     asset_scores: dict = {}
 
                     for win_name in _WINDOW_HOURS:
@@ -125,15 +135,29 @@ class IntradayScoreEngine:
                         if sr.confidence == "low":
                             result.low_confidence += 1
 
-                        row = _build_row(asset_id, _latest_ts(rows), self.interval, win_name, sr)
+                        # Credibilidad (Bloque 2). La persistencia es especialmente
+                        # valiosa intradía: flujo sostenido en la sesión vs fogonazo
+                        # de una barra. Usa la ventana de barras como horizonte de precio.
+                        cred = None
+                        if applies_cred and sr.score is not None:
+                            from app.scoring.credibility import assess_credibility
+                            cred = assess_credibility(
+                                rows, sr.score, n_bars,
+                                persist_min_obs=self._persist_min_obs,
+                            )
+
+                        row = _build_row(asset_id, _latest_ts(rows), self.interval, win_name, sr, cred)
                         if row is not None:
                             upsert_rows.append(row)
                             result.scores_computed += 1
                             asset_scores[win_name] = {
-                                "score":      sr.score,
-                                "confidence": sr.confidence,
-                                "proxy":      sr.proxy_used,
-                                "n_obs":      sr.n_obs,
+                                "score":             row["score"],
+                                "score_raw":         row["score_raw"],
+                                "credibility":       row["credibility"],
+                                "credibility_label": row["credibility_label"],
+                                "confidence":        sr.confidence,
+                                "proxy":             sr.proxy_used,
+                                "n_obs":             sr.n_obs,
                             }
 
                     if asset_scores:
@@ -212,18 +236,25 @@ def _build_row(
     interval: str,
     win: str,
     sr,
+    cred=None,
 ) -> Optional[dict]:
     """Devuelve None si el score no pudo calcularse (cold start total: <2 obs)."""
     if sr.score is None:
         return None
+    from app.scoring.credibility import penalized_score
+
     return {
         "asset_id":   asset_id,
         "ts":         ts,
         "interval":   interval,
         "win":        win,
-        "score":      sr.score,
-        "raw_zscore": sr.raw_zscore,
-        "proxy_used": sr.proxy_used,
-        "n_obs":      sr.n_obs,
-        "confidence": sr.confidence,
+        "score":              penalized_score(sr.score, cred),   # YA penalizado
+        "score_raw":          sr.score,                          # bruto pre-credibilidad
+        "raw_zscore":         sr.raw_zscore,
+        "proxy_used":         sr.proxy_used,
+        "n_obs":              sr.n_obs,
+        "confidence":         sr.confidence,
+        "credibility":        cred.credibility if cred else None,
+        "credibility_label":  cred.label if cred else None,
+        "credibility_reason": cred.reason if cred else None,
     }

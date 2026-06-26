@@ -39,9 +39,10 @@ class EngineResult:
 
 
 class ScoreEngine:
-    def __init__(self, db=None, min_obs: int = MIN_OBS_DEFAULT):
+    def __init__(self, db=None, min_obs: int = MIN_OBS_DEFAULT, persist_min_obs: int | None = None):
         self._db = db
         self._min_obs = min_obs
+        self._persist_min_obs_override = persist_min_obs
 
     @property
     def db(self):
@@ -49,6 +50,13 @@ class ScoreEngine:
             return self._db
         from app.db import get_db
         return get_db()
+
+    @property
+    def _persist_min_obs(self) -> int:
+        if self._persist_min_obs_override is not None:
+            return self._persist_min_obs_override
+        from app.config import settings
+        return settings.credibility_persist_min_obs
 
     def run_sync(self) -> dict:
         result = EngineResult()
@@ -71,6 +79,8 @@ class ScoreEngine:
                     strategy = get_strategy(asset_class, sector)
                     asset_scores: dict[str, dict] = {}
 
+                    applies_cred = getattr(strategy, "applies_credibility", False)
+
                     for window in (WINDOW_SHORT, WINDOW_LONG):
                         window_label = f"{window}d"
                         sr = strategy.compute(rows, window, self._min_obs)
@@ -78,12 +88,25 @@ class ScoreEngine:
                         if sr.confidence == "low":
                             result.low_confidence += 1
 
-                        row = _build_row(asset_id, window_label, sr)
+                        # Capa de credibilidad (Bloque 2): solo a estrategias de
+                        # flujo con volumen+precio, y solo si hay flujo que juzgar.
+                        cred = None
+                        if applies_cred and sr.score is not None:
+                            from app.scoring.credibility import assess_credibility
+                            cred = assess_credibility(
+                                rows, sr.score, window,
+                                persist_min_obs=self._persist_min_obs,
+                            )
+
+                        row = _build_row(asset_id, window_label, sr, cred)
                         if row:
                             upsert_rows.append(row)
                             result.scores_computed += 1
                             asset_scores[window_label] = {
-                                "score": sr.score,
+                                "score": row["score"],
+                                "score_raw": row["score_raw"],
+                                "credibility": row["credibility"],
+                                "credibility_label": row["credibility_label"],
                                 "confidence": sr.confidence,
                                 "proxy": sr.proxy_used,
                             }
@@ -155,15 +178,23 @@ class ScoreEngine:
 
 # ── Helper ─────────────────────────────────────────────────────────────────────
 
-def _build_row(asset_id: int, window: str, sr: ScoreResult) -> Optional[dict]:
+def _build_row(asset_id: int, window: str, sr: ScoreResult, cred=None) -> Optional[dict]:
     from app.ingest._base import day_ts
+    from app.scoring.credibility import penalized_score
+
     return {
         "asset_id":   asset_id,
         "ts":         day_ts(),
         "win":        window,
-        "score":      sr.score,
-        "raw_zscore": sr.raw_zscore,
-        "proxy_used": sr.proxy_used,
-        "n_obs":      sr.n_obs,
-        "confidence": sr.confidence,
+        # 'score' YA penalizado (lo consumen rankings/régimen/alertas); 'score_raw'
+        # conserva el bruto. Credibilidad ⟂ confidence (cold start): ejes distintos.
+        "score":              penalized_score(sr.score, cred),
+        "score_raw":          sr.score,
+        "raw_zscore":         sr.raw_zscore,
+        "proxy_used":         sr.proxy_used,
+        "n_obs":              sr.n_obs,
+        "confidence":         sr.confidence,
+        "credibility":        cred.credibility if cred else None,
+        "credibility_label":  cred.label if cred else None,
+        "credibility_reason": cred.reason if cred else None,
     }

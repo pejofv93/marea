@@ -39,6 +39,8 @@ class VolumeFlowStrategy:
     Lee: raw_snapshots.volume, raw_snapshots.close
     """
     proxy_name = "volume_zscore_signed"
+    # Estrategia de FLUJO con volumen+precio → se le aplica la capa de credibilidad.
+    applies_credibility = True
 
     def compute(
         self,
@@ -83,6 +85,9 @@ class CryptoVolumeStrategy:
     Lee: extra.volume_24h (o volume como fallback)
     """
     proxy_name = "crypto_volume_24h_zscore"
+    # Crypto spot: volumen + precio → la confirmación de precio es MUY valiosa
+    # aquí (el zscore de volumen no incorpora la dirección del precio).
+    applies_credibility = True
 
     def compute(
         self,
@@ -114,6 +119,9 @@ class StablecoinSupplyStrategy:
          extra.change_usd como alternativa directa si disponible
     """
     proxy_name = "stablecoin_supply_change_zscore"
+    # El cambio de supply es una MEDICIÓN directa del flujo (mint/burn), no un
+    # proxy de volumen con precio separado que confirmar → sin capa de credibilidad.
+    applies_credibility = False
 
     def compute(
         self,
@@ -142,6 +150,7 @@ class BondYieldStrategy:
     Lee: raw_snapshots.close (= yield en %)
     """
     proxy_name = "bond_yield_zscore_inverted"
+    applies_credibility = False   # proxy informativo de tipos, no flujo con volumen+precio
 
     def compute(
         self,
@@ -177,6 +186,7 @@ class DollarIndexStrategy:
     Lee: raw_snapshots.close
     """
     proxy_name = "dxy_zscore_informative"
+    applies_credibility = False   # termómetro informativo (dólar), no flujo
 
     def compute(
         self,
@@ -203,6 +213,7 @@ class VIXStrategy:
     Lee: raw_snapshots.close
     """
     proxy_name = "vix_zscore_inverted_informative"
+    applies_credibility = False   # termómetro de sentimiento (VIX), no flujo
 
     def compute(
         self,
@@ -240,6 +251,7 @@ class FearGreedStrategy:
     Lee: raw_snapshots.close (valor 0-100)
     """
     proxy_name = "fear_greed_linear_map"
+    applies_credibility = False   # termómetro de sentimiento (FNG), no flujo
 
     def compute(
         self,

@@ -33,6 +33,10 @@ class Settings(BaseSettings):
     # Ticker del 2Y para la curva 10Y-2Y (CBOE 2-Year yield future en yfinance).
     # Configurable por si cambia: ^FVX (5Y) o ^IRX (3M) sirven como alternativa.
     yield_curve_short_ticker: str = "2YY=F"
+    # Credibilidad del flujo (Bloque 2) — penaliza fogonazos. La señal de
+    # PERSISTENCIA se auto-activa al superar este nº de observaciones; por debajo,
+    # la credibilidad se calcula solo con volumen+precio (activos desde el día 1).
+    credibility_persist_min_obs: int = 10
 
     model_config = SettingsConfigDict(
         env_file=".env",

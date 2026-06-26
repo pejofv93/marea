@@ -30,6 +30,8 @@ class IntradayMovement:
     confidence: str             # 'ok' | 'low'
     interval:   str
     ts:         str
+    credibility_label:  Optional[str] = None   # confirmado/dudoso/fogonazo (Bloque 2)
+    credibility_reason: Optional[str] = None
 
 
 @dataclass
@@ -52,6 +54,8 @@ class IntradayAnalysisResult:
                     "confidence":  m.confidence,
                     "interval":    m.interval,
                     "ts":          m.ts,
+                    "credibility_label":  m.credibility_label,
+                    "credibility_reason": m.credibility_reason,
                 }
                 for m in self.movements
             ],
@@ -142,6 +146,7 @@ class IntradayAnalysisEngine:
                 self.db.table("flow_scores_intraday")
                 .select(
                     "asset_id,ts,interval,win,score,confidence,"
+                    "credibility_label,credibility_reason,"
                     "assets(ticker,asset_class,sector)"
                 )
                 .eq("win", "4h")
@@ -207,6 +212,8 @@ def _build_movement(entries: list[dict], threshold: float) -> Optional[IntradayM
         confidence=conf,
         interval=iv,
         ts=ts,
+        credibility_label=latest.get("credibility_label"),
+        credibility_reason=latest.get("credibility_reason"),
     )
 
 
