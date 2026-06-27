@@ -50,6 +50,8 @@ on:
     - cron: "0 20 * * *"    # 22:00 ES — disparo principal de tarde/cierre
     - cron: "15 20 * * *"   # 22:15 ES — red de seguridad (+15 min)
   workflow_dispatch:          # permite lanzarlo a mano desde la pestaña «Actions»
+  repository_dispatch:        # disparo externo vía API de GitHub (cron-job.org),
+    types: [run-intraday]     # porque el scheduler de Actions se salta ciclos
 
 # Evita solapes si una ejecución se alarga más que el hueco hasta la siguiente.
 concurrency:

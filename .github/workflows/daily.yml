@@ -20,6 +20,8 @@ on:
   schedule:
     - cron: "30 20 * * *"   # 22:30 España (verano) — tras cierre USA
   workflow_dispatch:          # permite lanzarlo a mano desde la pestaña «Actions»
+  repository_dispatch:        # disparo externo vía API de GitHub (cron-job.org),
+    types: [run-daily]        # porque el scheduler de Actions se salta ciclos
 
 concurrency:
   group: marea-daily
