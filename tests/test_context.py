@@ -195,6 +195,42 @@ class TestAutoActivation:
         assert ctx.digest_lines({INDICATOR_BTC_DOMINANCE: st}) == []
 
 
+class TestEmptyParenthesisDefect1:
+    """Defecto 1: nunca un paréntesis vacío '()' cuando no hay tendencia previa."""
+
+    def test_dominance_single_obs_no_empty_parenthesis(self):
+        # 1 sola observación → sin valor previo con que comparar (trend None,
+        # dirección 'unknown'): NO debe aparecer "()" vacío.
+        st = ctx.evaluate_series(INDICATOR_BTC_DOMINANCE, _series(INDICATOR_BTC_DOMINANCE, [55.7]), min_obs=5)
+        assert st.trend is None and st.direction == "unknown"
+        line = ctx._dom_line(st)
+        assert "()" not in line
+        assert "( " not in line and " )" not in line     # ni paréntesis con basura
+        assert "Dominancia BTC: 55.7%" in line            # el valor sí se muestra
+
+    def test_dominance_with_trend_shows_parenthesis(self):
+        # Con histórico previo SÍ hay tendencia → se muestra el paréntesis lleno.
+        st = ctx.evaluate_series(
+            INDICATOR_BTC_DOMINANCE, _series(INDICATOR_BTC_DOMINANCE, [55.5, 55.9]), min_obs=5
+        )
+        line = ctx._dom_line(st)
+        assert "()" not in line
+        assert "subiendo" in line and "pp)" in line       # tendencia + variación
+
+    def test_no_indicator_line_has_empty_parenthesis(self):
+        # Misma revisión a crédito y curva: un único dato no produce "()" vacío.
+        states = {
+            INDICATOR_BTC_DOMINANCE: ctx.evaluate_series(
+                INDICATOR_BTC_DOMINANCE, _series(INDICATOR_BTC_DOMINANCE, [55.7]), min_obs=5),
+            INDICATOR_CREDIT_SPREAD: ctx.evaluate_series(
+                INDICATOR_CREDIT_SPREAD, _series(INDICATOR_CREDIT_SPREAD, [0.73]), min_obs=5),
+            INDICATOR_YIELD_CURVE: ctx.evaluate_series(
+                INDICATOR_YIELD_CURVE, _series(INDICATOR_YIELD_CURVE, [0.4]), min_obs=5),
+        }
+        for line in ctx.digest_lines(states):
+            assert "()" not in line
+
+
 class TestDirection:
 
     def test_credit_widening_is_risk_off(self):

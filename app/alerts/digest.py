@@ -32,8 +32,14 @@ el ciclo (digest_cycles) para que el siguiente parte pueda comparar. Nunca lanza
 from __future__ import annotations
 
 import logging
+import re
 
 logger = logging.getLogger("marea.alerts.digest")
+
+# Límite duro de longitud de un mensaje de Telegram (sendMessage). Si lo
+# superamos, la API lo RECHAZA entero. El parte se compone respetándolo
+# (ver _compose_within_limit), priorizando que la narrativa quede COMPLETA.
+TELEGRAM_LIMIT = 4096
 
 _DISCLAIMER = "⚠️ Interpretación automática · no es consejo de inversión."
 _COLD_NOTICE = "⚠️ <i>Datos preliminares (histórico insuficiente, baja confianza)</i>"
@@ -68,6 +74,39 @@ _SENTIMENT = SENTIMENT_TICKERS   # alias interno retrocompatible
 _STABLE_TICKERS = {"STABLES_USDT", "STABLES_USDC"}
 _CRYPTO_TICKERS = {"BTC", "ETH", "BTC-USD", "ETH-USD", "BTC_PERP", "ETH_PERP", "IBIT"}
 _SAFE_TICKERS = {"GC=F", "SI=F", "GLD", "SLV", "GDX", "SIL", "DX-Y.NYB", "^VIX", "^TNX"}
+
+# ── Grupos de equivalencia de proxies (Defecto 3) ─────────────────────────────
+# Activos que son la MISMA exposición de fondo (mismo subyacente) por distintos
+# vehículos: spot, ETF, perp. El dinero NO "rota" entre miembros del mismo grupo
+# (de USDT a su gemela USDC, de BTC spot a su ETF IBIT): presentar eso como un
+# flujo de A→B es un sinsentido. Y cuando dos vehículos del mismo grupo DIVERGEN
+# (spot sale, ETF entra) se da una lectura UNIFICADA — "divergencia entre
+# vehículos" — en vez de dos líneas que se contradicen.
+_EQUIV_GROUPS: dict[str, set[str]] = {
+    "Bitcoin":     {"BTC", "BTC-USD", "IBIT", "BTC_PERP"},
+    "Ethereum":    {"ETH", "ETH-USD", "ETH_PERP"},
+    "stablecoins": {"STABLES_USDT", "STABLES_USDC"},
+    "oro":         {"GC=F", "GLD"},
+    "plata":       {"SI=F", "SLV"},
+}
+_TICKER_GROUP = {t: g for g, members in _EQUIV_GROUPS.items() for t in members}
+
+# Grupos cuya divergencia interna SÍ es noticia "spot vs ETF/derivados". Las
+# stablecoins quedan FUERA: USDT↔USDC son refugio en dólar (no vehículos de un
+# subyacente que sube/baja); su coherencia se garantiza tratándolas como grupo en
+# la pólvora, no señalando "divergencia" cuando una se acuña y otra se redime.
+_VEHICLE_DIVERGENCE_GROUPS = {"Bitcoin", "Ethereum", "oro", "plata"}
+
+
+def _group_of(ticker: str | None) -> str | None:
+    """Grupo de equivalencia del ticker, o None si no pertenece a ninguno."""
+    return _TICKER_GROUP.get(ticker)
+
+
+def _same_group(a: dict, b: dict) -> bool:
+    """True si dos activos son el MISMO subyacente por distinto vehículo."""
+    ga = _group_of(a.get("ticker"))
+    return ga is not None and ga == _group_of(b.get("ticker"))
 
 # Diccionario ticker → nombre legible (es). Cae a assets.name y luego al ticker.
 _READABLE = {
@@ -333,13 +372,27 @@ def _headline(assets: list[dict]) -> str:
     outs = sorted([a for a in fa if _score(a) <= -_MODERATE], key=_score)
     if not ins and not outs:
         return "Mercado tranquilo: sin rotaciones de liquidez marcadas"
+    top_out = outs[0] if outs else None
+    top_in = ins[0] if ins else None
+    # Defecto 3: si la mayor salida y la mayor entrada son el MISMO subyacente
+    # (spot vs ETF), no titular con una contradicción. Se busca un representante de
+    # OTRO grupo para el par; si no lo hay, se titula la divergencia directamente.
+    if top_out and top_in and _same_group(top_out, top_in):
+        alt_in = next((a for a in ins if not _same_group(a, top_out)), None)
+        alt_out = next((a for a in outs if not _same_group(a, top_in)), None)
+        if alt_in:
+            top_in = alt_in
+        elif alt_out:
+            top_out = alt_out
+        else:
+            return f"Señales mixtas en {_group_of(top_out['ticker'])}: spot y ETF divergen"
     parts: list[str] = []
-    if outs:
-        parts.append(f"sale capital de {_name(outs[0])}")
-    if ins:
-        parts.append(f"entra en {_name(ins[0])}")
+    if top_out:
+        parts.append(f"sale capital de {_name(top_out)}")
+    if top_in:
+        parts.append(f"entra en {_name(top_in)}")
     cryptos_in = [a for a in fa if _classify(a) == "crypto" and _score(a) >= _MODERATE]
-    if cryptos_in and not (ins and _classify(ins[0]) == "crypto"):
+    if cryptos_in and not (top_in and _classify(top_in) == "crypto"):
         parts.append("algo entra en cripto")
     s = "; ".join(parts)
     return s[:1].upper() + s[1:] if s else "Movimiento de liquidez en curso"
@@ -388,9 +441,16 @@ def _infer_destination(source_ticker: str, assets: list[dict]) -> str:
     Inferencia POR SIMULTANEIDAD (no rastreo): los receptores son los activos
     que reciben inflow ≥ moderado a la vez que `source_ticker` tiene salida.
     Si hay receptores claros → "parece dirigirse a …"; si no → "en espera".
+
+    Defecto 3: el destino EXCLUYE los proxies del MISMO grupo de equivalencia que
+    el origen — el dinero no "se dirige" de USDT a USDC ni de BTC spot a su ETF.
     """
+    src_group = _group_of(source_ticker)
     receptors = sorted(
-        [a for a in _flow_assets(assets) if a.get("ticker") != source_ticker and _score(a) >= _MODERATE],
+        [a for a in _flow_assets(assets)
+         if a.get("ticker") != source_ticker
+         and not (src_group and _group_of(a.get("ticker")) == src_group)
+         and _score(a) >= _MODERATE],
         key=_score, reverse=True,
     )
     if receptors:
@@ -412,6 +472,10 @@ def _powder_line(assets: list[dict]) -> str | None:
     stables = [a for a in (assets or []) if _classify(a) == "stable"]
     if not stables:
         return None
+    # Defecto 3: la pólvora se mide sobre el GRUPO completo de stablecoins (USDT +
+    # USDC juntas), no proxy suelto. Su promedio es el flujo NETO del refugio en
+    # dólar: si USDT sale y USDC entra por igual, el grupo no movió pólvora (neto
+    # ~0) — coherente con que NO se infiera "USDT se dirige a USDC" en los rankings.
     avg = sum(_score(a) for a in stables) / len(stables)
     cryptos = [a for a in (assets or []) if _classify(a) == "crypto"]
     crypto_recv = [a for a in cryptos if _score(a) >= _MODERATE]
@@ -458,6 +522,52 @@ def _crypto_block(assets: list[dict]) -> list[str]:
     return lines
 
 
+# ── Divergencia entre vehículos del mismo grupo (Defecto 3) ───────────────────
+# Cuando dos proxies del MISMO subyacente (BTC spot vs su ETF IBIT, oro spot vs
+# GLD…) se mueven en sentidos OPUESTOS, no se cuentan como dos flujos contrarios
+# de capital distinto: se da una lectura UNIFICADA que lo nombra como lo que es,
+# una divergencia entre vehículos. Es información, no un error.
+
+def _divergences(assets: list[dict]) -> list[tuple[str, list[dict], list[dict]]]:
+    """
+    Grupos de vehículos cuyos miembros divergen en signo (uno entra, otro sale)
+    con al menos un movimiento ≥ moderado (si todo es ruido leve, no es noticia).
+    Devuelve [(grupo, [entran], [salen])]. Excluye stablecoins (no son spot/ETF).
+    """
+    by_group: dict[str, list[dict]] = {}
+    for a in _flow_assets(assets):
+        g = _group_of(a.get("ticker"))
+        if g in _VEHICLE_DIVERGENCE_GROUPS:
+            by_group.setdefault(g, []).append(a)
+
+    out: list[tuple[str, list[dict], list[dict]]] = []
+    for g in _EQUIV_GROUPS:                      # orden estable de presentación
+        members = by_group.get(g)
+        if not members or len(members) < 2:
+            continue
+        ins = sorted([m for m in members if _score(m) > 0], key=_score, reverse=True)
+        outs = sorted([m for m in members if _score(m) < 0], key=_score)
+        if ins and outs and max(abs(_score(m)) for m in members) >= _MODERATE:
+            out.append((g, ins, outs))
+    return out
+
+
+def render_divergence_block(assets: list[dict]) -> list[str]:
+    """Bloque "🔀 Divergencias entre vehículos". Sin divergencias → no se muestra."""
+    divs = _divergences(assets)
+    if not divs:
+        return []
+    lines = ["🔀 <b>Divergencias entre vehículos:</b>"]
+    for g, ins, outs in divs:
+        in_frag = ", ".join(f"{_name(m)} entra ({_score(m):+.2f})" for m in ins)
+        out_frag = ", ".join(f"{_name(m)} sale ({_score(m):+.2f})" for m in outs)
+        lines.append(
+            f"  • En {g}, señales mixtas entre vehículos del mismo subyacente: "
+            f"{in_frag}; {out_frag} — es divergencia spot/ETF, no dos flujos opuestos."
+        )
+    return lines
+
+
 # ── Quién manda (dictamina o declara empate) ──────────────────────────────────
 
 def _pressure_for(asset: dict, inflow: bool) -> str:
@@ -476,6 +586,23 @@ def _who_dominates(assets: list[dict]) -> str:
     outflows = [a for a in fa if _score(a) < 0]
     top_in = max(inflows, key=_score, default=None)
     top_out = min(outflows, key=_score, default=None)
+
+    # Defecto 3: si la mayor entrada y la mayor salida son el MISMO subyacente
+    # (spot vs ETF), no es una pugna de fuerzas del mercado sino una divergencia
+    # entre vehículos. Se buscan representantes de OTRO grupo; si no los hay, se
+    # declara la divergencia en vez de enfrentarlos como contrarios.
+    if top_in and top_out and _same_group(top_in, top_out):
+        alt_in = max([a for a in inflows if not _same_group(a, top_out)], key=_score, default=None)
+        alt_out = min([a for a in outflows if not _same_group(a, top_in)], key=_score, default=None)
+        if alt_in or alt_out:
+            top_in = alt_in or top_in
+            top_out = alt_out or top_out
+        else:
+            g = _group_of(top_in["ticker"])
+            return (
+                f"⚡ <b>Quién manda:</b> en {g} divergen los vehículos "
+                "(spot y ETF en sentidos opuestos); sin dominancia clara este ciclo."
+            )
 
     if top_in and top_out:
         mi, mo = abs(_score(top_in)), abs(_score(top_out))
@@ -618,20 +745,101 @@ def render_macro_block(events) -> list[str]:
     return lines
 
 
+# Presupuesto de la "frase de color" de Groq en el parte. La narrativa de Groq
+# es un párrafo de hasta ~200 palabras; aquí solo entra como color en cursiva, así
+# que se recorta — pero SIEMPRE en límite de FRASE (nunca a media palabra). El
+# corte original a 220 chars + "…" cortaba a media palabra ("Los datos mu…"): eso
+# es lo que arregla _clip_sentences (Defecto 2).
+_NARRATIVE_BUDGET = 360
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?…])\s+")
+
+
+def _clip_sentences(text: str, max_len: int) -> str:
+    """
+    Recorta `text` a FRASES COMPLETAS dentro de `max_len`. Garantías:
+      · Si el texto entero cabe → se devuelve intacto.
+      · Si no → se acumulan frases completas (sin cortar ninguna) hasta el
+        presupuesto; el resultado termina en un punto/!/?, nunca a media palabra.
+      · Caso extremo (una sola frase ya más larga que el presupuesto, sin
+        puntuación interna) → se corta en límite de PALABRA y se cierra con " …"
+        (jamás a media palabra).
+    """
+    text = text.strip()
+    if len(text) <= max_len:
+        return text
+    parts = _SENTENCE_SPLIT.split(text)
+    out = parts[0].strip()
+    for s in parts[1:]:
+        nxt = f"{out} {s.strip()}".strip()
+        if len(nxt) <= max_len:
+            out = nxt
+        else:
+            break
+    if len(out) > max_len:   # frase única desmesurada → corte en palabra + " …"
+        out = out[:max_len].rsplit(" ", 1)[0].rstrip(" ,;:") + " …"
+    return out
+
+
 def _narrative_snippet(narrative: str | None) -> str | None:
     if not narrative or not narrative.strip():
         return None
-    snippet = narrative.strip().splitlines()[0].strip()
-    if not snippet:
+    # Une el párrafo (colapsa saltos de línea y espacios) para considerar la frase
+    # entera, no solo la primera línea, y luego recorta en límite de frase.
+    text = " ".join(narrative.split())
+    if not text:
         return None
-    if len(snippet) > 220:
-        snippet = snippet[:217] + "…"
-    return f"🖊 <i>{snippet}</i>"
+    return f"🖊 <i>{_clip_sentences(text, _NARRATIVE_BUDGET)}</i>"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Composición — funciones PURAS (reciben estado, devuelven texto)
 # ══════════════════════════════════════════════════════════════════════════════
+
+_TRUNCATION_MARKER = "✂️ <i>(parte recortado por longitud; lo esencial y la lectura quedan arriba)</i>"
+
+
+def _render_blocks(blocks: list[list[str]]) -> str:
+    """Une bloques NO vacíos: doble salto entre bloques, simple dentro de cada uno."""
+    return "\n\n".join("\n".join(b) for b in blocks if b)
+
+
+def _clip_lines(text: str, limit: int) -> str:
+    """Recorta `text` a `limit` por LÍNEAS completas — nunca a media palabra."""
+    if len(text) <= limit:
+        return text
+    out: list[str] = []
+    total = 0
+    for ln in text.split("\n"):
+        add = len(ln) + (1 if out else 0)   # el "\n" que reuniría esta línea
+        if total + add > limit:
+            break
+        out.append(ln)
+        total += add
+    return "\n".join(out)
+
+
+def _compose_within_limit(blocks: list[list[str]], tail: list[list[str]]) -> str:
+    """
+    Une cuerpo + cola y respeta el límite de Telegram (Defecto 2). La COLA
+    (narrativa de color + sello) es INTOCABLE: si el mensaje excede el límite, se
+    recortan bloques del CUERPO de abajo arriba — los menos esenciales (contexto,
+    detección temprana, agenda) están al final, así que caen primero; el titular y
+    los rankings de arriba se conservan — y se marca el recorte. La narrativa queda
+    SIEMPRE completa. Nunca corta a media palabra: trabaja por bloques/líneas enteras.
+    """
+    text = _render_blocks(blocks + tail)
+    if len(text) <= TELEGRAM_LIMIT:
+        return text
+    body = list(blocks)
+    while body:
+        body.pop()
+        text = _render_blocks(body + [[_TRUNCATION_MARKER]] + tail)
+        if len(text) <= TELEGRAM_LIMIT:
+            return text
+    # Red extrema (ni cabecera+cola caben; la cola va acotada → no debería ocurrir):
+    # recorta por líneas enteras como último recurso, jamás a media palabra.
+    return _clip_lines(_render_blocks([[_TRUNCATION_MARKER]] + tail), TELEGRAM_LIMIT)
+
 
 def build_daily_digest(
     state: dict,
@@ -697,6 +905,12 @@ def build_daily_digest(
     # 6. Crypto + cierre de pólvora
     blocks.append(_crypto_block(assets))
 
+    # 6b. Divergencias entre vehículos del mismo subyacente (Defecto 3): lectura
+    #     UNIFICADA cuando spot y ETF/perp se contradicen. Vacío → no se muestra.
+    divergence = render_divergence_block(assets)
+    if divergence:
+        blocks.append(divergence)
+
     # 7. Cambio temporal (origen→destino)
     blocks.append(_compare_block(assets, compare))
 
@@ -718,15 +932,16 @@ def build_daily_digest(
     if volume_lines:
         blocks.append(volume_lines)
 
-    # (color) narrativa Groq, opcional
+    # Cola PROTEGIDA: la narrativa de color (si hay) + el sello. Si el parte excede
+    # el límite de Telegram, se recorta el CUERPO antes que la cola → la narrativa
+    # queda SIEMPRE completa (Defecto 2).
+    tail: list[list[str]] = []
     snippet = _narrative_snippet(narrative)
     if snippet:
-        blocks.append([snippet])
+        tail.append([snippet])
+    tail.append([_DISCLAIMER])
 
-    # 10. Sello
-    blocks.append([_DISCLAIMER])
-
-    return "\n\n".join("\n".join(b) for b in blocks)
+    return _compose_within_limit(blocks, tail)
 
 
 def build_intraday_digest(
@@ -781,6 +996,12 @@ def build_intraday_digest(
 
     blocks.append(_crypto_block(assets))
 
+    # Divergencias entre vehículos del mismo subyacente (Defecto 3): lectura
+    # unificada spot/ETF en vez de dos líneas contradictorias. Vacío → no se muestra.
+    divergence = render_divergence_block(assets)
+    if divergence:
+        blocks.append(divergence)
+
     # Bloque 3 — giros y ritmo (intradía), solo si hay algo que mostrar.
     if giros_lines:
         blocks.append(giros_lines)
@@ -799,9 +1020,8 @@ def build_intraday_digest(
     if ctx:
         blocks.append(ctx)
 
-    blocks.append([_DISCLAIMER])
-
-    return "\n\n".join("\n".join(b) for b in blocks)
+    # Sello como cola protegida; respeta el límite de Telegram (Defecto 2).
+    return _compose_within_limit(blocks, [[_DISCLAIMER]])
 
 
 # ══════════════════════════════════════════════════════════════════════════════

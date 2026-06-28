@@ -163,8 +163,13 @@ def _dom_line(st: IndicatorState) -> str:
         read = " — apetito por riesgo en crypto"
     else:
         read = ""
-    delta = f", {st.trend:+.2f} pp" if st.trend is not None else ""
-    return f"  • Dominancia BTC: {st.level:.1f}% ({move}{delta}){read}{tag}"
+    # Defecto 1: sin valor previo con que comparar (n<2 → trend None, dirección
+    # 'unknown') no hay tendencia que enseñar. NO escribir un paréntesis vacío "()":
+    # se omite el paréntesis por completo (queda "Dominancia BTC: 55.7%").
+    delta = f"{st.trend:+.2f} pp" if st.trend is not None else ""
+    inner = ", ".join(p for p in (move, delta) if p)
+    paren = f" ({inner})" if inner else ""
+    return f"  • Dominancia BTC: {st.level:.1f}%{paren}{read}{tag}"
 
 
 def _credit_line(st: IndicatorState) -> str:
@@ -173,8 +178,10 @@ def _credit_line(st: IndicatorState) -> str:
         read = "spreads ensanchándose → tono risk-off"
     elif st.direction == "rising":
         read = "spreads estrechándose → tono risk-on"
-    else:
+    elif st.direction == "flat":
         read = "spreads estables"
+    else:  # 'unknown' — aún sin valor previo: no afirmar estabilidad que no consta
+        read = "sin variación previa"
     return f"  • Crédito (HYG/LQD): {st.level:.3f} — {read}{tag}"
 
 
@@ -182,6 +189,8 @@ def _curve_line(st: IndicatorState) -> str:
     tag = "" if st.active else " <i>(preliminar)</i>"
     if st.level is not None and st.level < 0:
         read = "curva INVERTIDA → señal de recesión/risk-off"
+    elif st.direction == "unknown":   # sin valor previo: no inventar movimiento
+        read = "curva normal (sin variación previa)"
     else:
         move = _DIR_CURVE.get(st.direction, "estable")
         read = f"curva normal ({move})"

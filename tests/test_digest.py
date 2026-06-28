@@ -15,6 +15,7 @@ Garantías verificadas (entregables del rediseño):
   (i) NINGÚN test hace llamadas reales (ni Telegram, ni BD).
 """
 
+import re
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -449,3 +450,191 @@ def test_save_cycle_no_propaga_si_db_falla():
     db.table.side_effect = RuntimeError("db caída")
     # No debe lanzar:
     digest._save_cycle(db, "daily", "cierre", [_a("BTC", 0.5, "crypto")])
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Defecto 2 — narrativa completa (límite de FRASE, nunca a media palabra) +
+#             el mensaje total respeta el límite de Telegram.
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _snippet_text(snippet: str) -> str:
+    """Extrae el texto plano de '🖊 <i>...</i>'."""
+    return snippet.replace("🖊 <i>", "").replace("</i>", "").strip()
+
+
+def _ends_clean(text: str) -> bool:
+    """True si termina en frase (./!/?/…) o en ' …' tras palabra — nunca a media palabra."""
+    return text.endswith((".", "!", "?", "…")) and not bool(re.search(r"\w…$", text))
+
+
+def test_narrativa_larga_no_se_corta_a_media_palabra():
+    # Narrativa de varias frases: el snippet debe terminar en límite de frase.
+    narr = (
+        "Los datos disponibles sugieren un patrón de rotación hacia refugio. "
+        "El flujo hacia el oro se intensifica de forma moderada. "
+        "La confianza es del 24% y el histórico es aún limitado. "
+        "Las señales en cripto son mixtas y conviene leerlas con cautela."
+    )
+    snip = digest._narrative_snippet(narr)
+    txt = _snippet_text(snip)
+    assert _ends_clean(txt)                       # cierra en frase, no a media palabra
+    assert "mu…" not in txt and "Los datos mu" not in txt
+    # No parte una palabra: el último "token" antes del cierre es palabra completa.
+    assert not re.search(r"[A-Za-zÁÉÍÓÚáéíóúñ]…$", txt)
+
+
+def test_narrativa_que_cabe_entera_no_se_recorta():
+    narr = "El mercado rota hacia bolsa USA."
+    snip = digest._narrative_snippet(narr)
+    assert _snippet_text(snip) == narr            # intacta, sin "…"
+    assert "…" not in snip
+
+
+def test_narrativa_multilinea_se_une_no_solo_primera_linea():
+    # Antes solo se cogía la primera línea; ahora se une el párrafo entero.
+    narr = "Primera frase corta.\nSegunda frase con más detalle del flujo."
+    txt = _snippet_text(digest._narrative_snippet(narr))
+    assert "Segunda frase" in txt
+    assert _ends_clean(txt)
+
+
+def test_narrativa_frase_unica_desmesurada_corta_en_palabra():
+    # Una sola frase larguísima sin puntuación interna → corta en PALABRA + ' …'.
+    narr = "palabra " * 200                        # ~1400 chars, sin puntos
+    txt = _snippet_text(digest._narrative_snippet(narr))
+    assert txt.endswith(" …")                      # espacio antes de la elipsis
+    assert not re.search(r"\w…$", txt)             # nunca pegada a media palabra
+
+
+def test_clip_sentences_devuelve_texto_corto_intacto():
+    assert digest._clip_sentences("Frase breve.", 360) == "Frase breve."
+
+
+def test_mensaje_total_respeta_limite_telegram():
+    # _compose_within_limit nunca devuelve más que el límite, aunque el cuerpo sea
+    # enorme; recorta el CUERPO (no la cola) y marca el recorte.
+    big_body = [[f"línea de relleno número {i} con texto suficiente para abultar"] * 6
+                for i in range(400)]
+    tail = [["🖊 <i>Narrativa de color que debe quedar COMPLETA.</i>"], [digest._DISCLAIMER]]
+    out = digest._compose_within_limit(big_body, tail)
+    assert len(out) <= digest.TELEGRAM_LIMIT
+
+
+def test_recorte_preserva_narrativa_completa_y_sello():
+    big_body = [[f"bloque {i} " + "x" * 80] for i in range(400)]
+    narrative_line = "🖊 <i>Narrativa de color que debe quedar COMPLETA y sin cortes.</i>"
+    tail = [[narrative_line], [digest._DISCLAIMER]]
+    out = digest._compose_within_limit(big_body, tail)
+    assert narrative_line in out                   # narrativa intacta (prioridad)
+    assert digest._DISCLAIMER in out               # sello intacto
+    assert "recortado por longitud" in out         # se avisa del recorte
+
+
+def test_build_daily_normal_bajo_limite_y_narrativa_intacta():
+    narr = "Los datos sugieren rotación hacia bolsa USA con confianza moderada."
+    text = build_daily_digest(_state(), narrative=narr)
+    assert len(text) <= digest.TELEGRAM_LIMIT
+    assert narr in text                            # frase única corta → intacta
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Defecto 3 — grupos de equivalencia de proxies (misma exposición de fondo).
+# ══════════════════════════════════════════════════════════════════════════════
+
+def test_destino_excluye_proxy_del_mismo_grupo_stablecoins():
+    # USDT sale fuerte, USDC entra fuerte: NO inferir "USDT → USDC" (gemelas).
+    assets = [_a("STABLES_USDT", -1.0, "onchain", "stablecoin"),
+              _a("STABLES_USDC", 1.0, "onchain", "stablecoin")]
+    dest = digest._infer_destination("STABLES_USDT", assets)
+    assert "USDC" not in dest
+    assert "en espera" in dest                      # sin destino fuera del grupo
+
+
+def test_destino_excluye_etf_del_mismo_grupo_bitcoin():
+    # BTC spot sale, su ETF IBIT entra: el destino NO puede ser IBIT (mismo BTC).
+    assets = [_a("BTC", -0.9, "crypto"), _a("IBIT", 0.9, "etf", "crypto")]
+    dest = digest._infer_destination("BTC", assets)
+    assert "IBIT" not in dest and "Bitcoin ETF" not in dest
+
+
+def test_destino_si_apunta_a_otro_grupo():
+    # Regresión: con receptor de OTRO grupo, el destino sí se infiere.
+    assets = [_a("BTC", -0.9, "crypto"), _a("^GSPC", 0.8, "index")]
+    dest = digest._infer_destination("BTC", assets)
+    assert "parece dirigirse a" in dest and "S&P 500" in dest
+
+
+def test_divergencia_spot_etf_da_lectura_unificada():
+    assets = [_a("BTC", -0.9, "crypto"), _a("IBIT", 0.9, "etf", "crypto")]
+    block = digest.render_divergence_block(assets)
+    assert block, "debe haber bloque de divergencia"
+    joined = "\n".join(block)
+    assert "En Bitcoin" in joined
+    assert "divergencia spot/ETF" in joined
+    # Una sola lectura unificada, no dos líneas opuestas sueltas.
+    assert "Bitcoin ETF (IBIT) entra" in joined and "Bitcoin sale" in joined
+
+
+def test_divergencia_no_aplica_a_stablecoins():
+    # USDT/USDC no son spot/ETF de un subyacente: no generan "divergencia entre
+    # vehículos" (su coherencia la lleva la pólvora como grupo).
+    assets = [_a("STABLES_USDT", -1.0, "onchain", "stablecoin"),
+              _a("STABLES_USDC", 1.0, "onchain", "stablecoin")]
+    assert digest.render_divergence_block(assets) == []
+
+
+def test_divergencia_ignora_ruido_leve():
+    # Movimientos leves del mismo grupo no son noticia.
+    assets = [_a("BTC", -0.2, "crypto"), _a("IBIT", 0.1, "etf", "crypto")]
+    assert digest.render_divergence_block(assets) == []
+
+
+def test_titular_no_contradice_spot_etf_del_mismo_grupo():
+    # Sin alternativa de otro grupo → titula la divergencia, no "sale BTC; entra BTC".
+    assets = [_a("BTC", -0.9, "crypto"), _a("IBIT", 0.9, "etf", "crypto")]
+    head = digest._headline(assets)
+    assert "Señales mixtas en Bitcoin" in head
+    assert not ("sale capital de Bitcoin" in head and "entra en Bitcoin ETF" in head)
+
+
+def test_titular_usa_otro_grupo_si_existe():
+    # Con XLF/S&P disponibles, el titular usa el par cross-group (historia real).
+    assets = [_a("BTC", -0.9, "crypto"), _a("IBIT", 0.95, "etf", "crypto"),
+              _a("^GSPC", 0.9, "index"), _a("XLF", -0.92, "etf", "financials")]
+    head = digest._headline(assets)
+    assert "Financieras (bancos)" in head or "S&P 500" in head
+
+
+def test_quien_manda_divergencia_mismo_grupo():
+    # Mayor entrada y mayor salida son el mismo BTC (spot vs ETF) → declara divergencia.
+    assets = [_a("BTC", -0.9, "crypto"), _a("IBIT", 0.9, "etf", "crypto")]
+    line = digest._who_dominates(assets)
+    assert "divergen los vehículos" in line
+    assert "Bitcoin" in line
+
+
+def test_polvora_coherente_con_grupo_stablecoins():
+    # USDT sale y USDC entra por igual → el GRUPO no movió pólvora (neto ~0):
+    # "apenas se mueven", coherente con que no haya rotación USDT→USDC.
+    assets = [_a("STABLES_USDT", -1.0, "onchain", "stablecoin"),
+              _a("STABLES_USDC", 1.0, "onchain", "stablecoin"),
+              _a("BTC", 0.1, "crypto")]
+    line = digest._powder_line(assets)
+    assert "apenas se mueven" in line
+
+
+def test_polvora_grupo_cae_junto_libera():
+    # Las dos stablecoins caen → el grupo libera pólvora (no se anulan).
+    assets = [_a("STABLES_USDT", -0.8, "onchain", "stablecoin"),
+              _a("STABLES_USDC", -0.7, "onchain", "stablecoin"),
+              _a("BTC", 0.7, "crypto")]
+    line = digest._powder_line(assets)
+    assert "se libera" in line and "crypto" in line
+
+
+def test_grupos_de_equivalencia_definidos():
+    # Las exposiciones clave comparten grupo; vehículos distintos, mismo subyacente.
+    assert digest._group_of("BTC") == digest._group_of("IBIT") == "Bitcoin"
+    assert digest._group_of("STABLES_USDT") == digest._group_of("STABLES_USDC") == "stablecoins"
+    assert digest._group_of("GC=F") == digest._group_of("GLD") == "oro"
+    assert digest._group_of("^GSPC") is None        # no pertenece a ningún grupo

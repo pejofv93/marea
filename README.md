@@ -1422,6 +1422,76 @@ fuente → degradación elegante, y la integración en el digest (diario + apert
 
 ---
 
+## Pulido de partes — tres defectos cosméticos/lógicos
+
+Revisando los partes reales de Telegram aparecieron tres defectos de
+presentación (ningún cambio de fondo). Se arreglan así:
+
+### Defecto 1 — paréntesis vacío en la dominancia BTC
+
+Antes, la primera vez (sin valor previo con que comparar) salía
+`Dominancia BTC: 55.7% () (preliminar)` — con un `()` **vacío**. Causa: la línea
+construía `({tendencia}{variación})` y, sin histórico, ambos eran cadena vacía.
+
+**Arreglo** (`app/analysis/context.py`): si no hay tendencia calculable (n<2 →
+`trend=None`, dirección `unknown`) se **omite el paréntesis por completo** →
+`Dominancia BTC: 55.7% (preliminar)`. Con tendencia se muestra lleno
+(`55.9% (estable, +0.18 pp)`). La **misma revisión** se aplicó a crédito y curva:
+no producían `()` vacío, pero afirmaban "estables/normal" sin dato previo; ahora
+dicen "sin variación previa" (honestidad, no inventan estabilidad que no consta).
+
+### Defecto 2 — narrativa de Groq cortada a media palabra
+
+Antes la línea `🖊` se truncaba a 220 chars con `…`, partiendo una palabra
+(`…Los datos mu…`). **Causa**: el snippet cogía solo la primera línea y cortaba a
+caracteres, sin respetar límites de frase ni de palabra.
+
+**Arreglo** (`app/alerts/digest.py`):
+- `_narrative_snippet` une el párrafo entero (no solo la primera línea) y
+  `_clip_sentences` recorta **a frases completas** dentro de un presupuesto
+  (`_NARRATIVE_BUDGET=360`): el resultado termina en `.`/`!`/`?`, **nunca a media
+  palabra**. Solo si una única frase excede el presupuesto se corta en **límite de
+  palabra** y se cierra con ` …` (espacio antes, jamás pegada a media palabra).
+- Límite de Telegram (4096): `_compose_within_limit` compone cuerpo + **cola
+  protegida** (narrativa + sello). Si el mensaje excediera el límite, recorta el
+  **cuerpo** de abajo arriba (los bloques menos esenciales — contexto, detección,
+  agenda — caen primero) y marca el recorte, de modo que **la narrativa queda
+  siempre completa**. Nunca corta a media palabra (trabaja por bloques/líneas).
+
+### Defecto 3 — proxies de la misma exposición tratados como independientes
+
+MAREA presentaba como opuestos activos que son la **misma apuesta de fondo**
+(USDT→USDC, "BTC sale" vs "IBIT entra"). Se definen **grupos de equivalencia**
+(`_EQUIV_GROUPS` en `app/alerts/digest.py`): Bitcoin `{BTC, BTC-USD, IBIT,
+BTC_PERP}`, Ethereum `{ETH, ETH-USD, ETH_PERP}`, stablecoins `{USDT, USDC}`, oro
+`{GC=F, GLD}`, plata `{SI=F, SLV}`. Reglas al presentar:
+
+- **Destino nunca al mismo grupo**: `_infer_destination` excluye los proxies del
+  grupo del origen → jamás "USDT se dirige a USDC" ni "BTC → IBIT". Si no hay
+  receptor de otro grupo, cierra como "capital en espera".
+- **Divergencia spot/ETF unificada**: cuando dos vehículos del mismo subyacente
+  divergen (BTC spot sale, IBIT entra), `render_divergence_block` da una lectura
+  **única** ("En Bitcoin, señales mixtas entre vehículos… es divergencia spot/ETF,
+  no dos flujos opuestos") en vez de dos líneas que se contradicen. El titular
+  (`_headline`) y "quién manda" (`_who_dominates`) tampoco enfrentan dos proxies
+  del mismo grupo: usan un representante de otro grupo si lo hay, o declaran la
+  divergencia. Las stablecoins quedan **fuera** de este bloque (USDT/USDC son
+  refugio en dólar, no spot/ETF de un subyacente que sube o baja).
+- **Pólvora coherente con el grupo**: `_powder_line` mide el flujo **neto del
+  grupo** de stablecoins (promedio de USDT+USDC). Si una sale y la otra entra por
+  igual, el grupo no movió pólvora (neto ~0 → "apenas se mueven") — coherente con
+  que no se infiera rotación USDT→USDC en los rankings.
+
+### Tests
+
+`tests/test_context.py` (+3) y `tests/test_digest.py` (+20): paréntesis nunca
+vacío (con y sin tendencia), narrativa cierra en frase / nunca a media palabra /
+mensaje total bajo el límite de Telegram con narrativa preservada, y grupos de
+equivalencia (destino excluye el grupo, divergencia spot/ETF unificada, pólvora
+coherente). Total: **650 tests verdes**.
+
+---
+
 ## Sesiones futuras
 
 - (todas las sesiones planificadas completadas)
